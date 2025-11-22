@@ -18,39 +18,39 @@ using Control = Vector2d;
 class Vehicle {
 public:
     /**
-     * @brief Araç simülatörünü başlatır.
-     * @param wheel_base Dingil mesafesi [m].
-     * @param max_steer_abs Maksimum mutlak direksiyon açısı [rad].
-     * @param max_accel_abs Maksimum mutlak ivme [m/s^2].
+     * @brief 
+     * @param wheel_base 
+     * @param max_steer_abs
+     * @param max_accel_abs
      */
     Vehicle(double wheel_base, double max_steer_abs, double max_accel_abs);
 
     /**
-     * @brief Aracı belirtilen başlangıç durumuna sıfırlar.
-     * @param init_state Başlangıç durumu [x, y, yaw, v].
+     * @brief
+     * @param init_state
      */
     void reset(const State& init_state);
 
     /**
-     * @brief Aracın durumunu Kinematik Bisiklet Modeli'ne göre günceller.
-     * @param u Kontrol girdisi [steer, accel].
-     * @param delta_t Simülasyon zaman adımı [s].
+     * @brief
+     * @param u 
+     * @param delta_t 
      */
     void update(const Control& u, double delta_t);
 
     /**
-     * @brief Aracın mevcut durumunu döndürür.
-     * @return Mevcut durum [x, y, yaw, v].
+     * @brief
+     * @return 
      */
     State get_state() const;
 
 private:
-    // Araç parametreleri
-    double L;           // Dingil mesafesi [m]
+    // Vehicle parameters
+    double L;           // [m]
     double max_steer;   // [rad]
     double max_accel;   // [m/s^2]
 
-    // Araç durumu
+    // Current state
     State state; // [x, y, yaw, v]
 };
 

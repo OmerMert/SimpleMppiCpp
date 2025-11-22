@@ -80,7 +80,7 @@ int main() {
         2.000  // max_accel_abs [m/s^2]
     );
 
-    vehicle.reset(Vector4d(0.0, 1.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
+    vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
 
     // initialize a mppi controller for the vehicle
     MPPIController mppi(
@@ -88,9 +88,9 @@ int main() {
         2.5,           // wheel_base [m]
         0.523,         // max_steer_abs [rad]
         2.000,         // max_accel_abs [m/s^2]
-        ref_path,      // ref_path size is <num_of_waypoints x 2>
-        10,            // horizon_step_T [steps]
-        200,           // number_of_samples_K [samples]
+        ref_path,      // ref_path, size is <num_of_waypoints x 2>
+        20,            // horizon_step_T [steps]
+        100,           // number_of_samples_K [samples]
         0.0,           // param_exploration
         100.0,         // param_lambda
         0.98,          // param_alpha
@@ -128,7 +128,7 @@ int main() {
         // update states of vehicle
         vehicle.update(optimal_input, delta_t);
 
-        // --- Veri Paketini Doldur ve Gönder ---
+        // --- send UDP data ---
         packet.time = t;
         packet.x = current_state[0];
         packet.y = current_state[1];

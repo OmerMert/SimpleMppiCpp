@@ -48,7 +48,6 @@ private:
     double param_alpha; //  constant parameter of mppi
     double param_gamma; //  constant parameter of mppi
     Matrix2d Sigma; // deviation of noise
-    Matrix2d Sigma_inv; // inverse of Sigma
     Vector4d stage_cost_weight;
     Vector4d terminal_cost_weight;
 
@@ -59,15 +58,14 @@ private:
     double max_accel;
     
     // Reference path
-    MatrixXd ref_path; // N x 4 matrisi [x, y, yaw, v]
+    MatrixXd ref_path; // N x 4 [x, y, yaw, v]
     int prev_waypoints_idx = 0;
 
-    // 
-    MatrixXd u_prev; // T x dim_u boyutunda
+    MatrixXd u_prev; // T x dim_u
 
-    // Rastgele sayı üreteci (Multivariate normal için)
+    // Random number generator
     std::default_random_engine generator;
-    Matrix2d cholesky_L; // Sigma'nın Cholesky ayrıştırması
+    Matrix2d cholesky_L; 
     std::normal_distribution<double> std_normal_dist{0.0, 1.0};
 
     // System dynamic
@@ -85,7 +83,6 @@ private:
     // Returns: [ref_x, ref_y, ref_yaw, ref_v]
     Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
 
-    // K x T x dim_u yerine (K*T) x dim_u matrisi döndüreceğiz
     MatrixXd _calc_epsilon();
 
     VectorXd _compute_weights(const VectorXd& S) const;

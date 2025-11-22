@@ -5,7 +5,7 @@
 
 #define M_PI       3.14159265358979323846
 
-// --- Yapılandırıcı (Constructor) ---
+// --- Constructor ---
 MPPIController::MPPIController(
     double delta_t, double wheel_base, double max_steer_abs, double max_accel_abs,
     const MatrixXd& ref_path, int horizon_step_T, int number_of_samples_K,
@@ -18,10 +18,9 @@ MPPIController::MPPIController(
       Sigma(sigma), stage_cost_weight(stage_cost_weight), terminal_cost_weight(terminal_cost_weight)
 {
     param_gamma = param_lambda * (1.0 - param_alpha);
-    Sigma_inv = Sigma.inverse();
     u_prev = MatrixXd::Zero(T, dim_u);
     
-    // Çok değişkenli normal dağılım için Cholesky ayrıştırması
+    // Cholesky decomposition of Sigma
     LLT<MatrixXd> llt(Sigma);
     if (llt.info() == NumericalIssue) {
         throw std::runtime_error("Sigma matrix is not positive!");
@@ -29,7 +28,7 @@ MPPIController::MPPIController(
     cholesky_L = llt.matrixL();
 }
 
-// --- Ana Kontrol Fonksiyonu ---
+
 std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& observed_x) {
     // load privious control input sequence
     MatrixXd u = u_prev;
@@ -44,75 +43,73 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         throw std::out_of_range("End of the reference path.");
     }
 
-    VectorXd S = VectorXd::Zero(K); // Maliyet listesi
+    // prepare buffer
+    VectorXd S = VectorXd::Zero(K); // state cost list
     
-    // Gürültüleri örnekle (K*T x dim_u)
-    MatrixXd epsilon = _calc_epsilon(); // K*T, dim_u
+    // sample noise
+    MatrixXd epsilon = _calc_epsilon(); // size is K*T, dim_u
 
-    // Örneklenmiş kontrol girdisi dizisi
-    // (Bellek optimizasyonu için bunu saklamayabiliriz, ancak python kodu saklıyor)
-    std::vector<MatrixXd> v(K, MatrixXd(T, dim_u));
+    // prepare buffer of sampled control input sequence
+    std::vector<MatrixXd> v(K, MatrixXd(T, dim_u)); // control input sequence with noise
 
+    // loop for 0 ~ K-1 samples
     for (int k = 0; k < K; ++k) {
+
+        // set initial(t=0) state x i.e. observed state of the vehicle
         State x = x0;
+
+        // loop for time step t = 1 ~ T
         for (int t = 0; t < T; ++t) {
             
-            // Vector2d current_epsilon ... satırını SİLİN.
-            
-            // Kontrol girdisini gürültü ile al
+            // get control input with noise
             if (k < (1.0 - param_exploration) * K) {
-                // 'current_epsilon' yerine 'epsilon.row(...)' kullanın
-                v[k].row(t) = u.row(t) + epsilon.row(k * T + t); // <-- DÜZELTİLDİ
+                v[k].row(t) = u.row(t) + epsilon.row(k * T + t); // sampling for exploitation
             } else {
-                // 'current_epsilon' yerine 'epsilon.row(...)' kullanın
-                v[k].row(t) = epsilon.row(k * T + t); // <-- DÜZELTİLDİ
+                v[k].row(t) = epsilon.row(k * T + t); //  sampling for exploitation
             }
 
-            // Kontrol girdisini uygula
+            // update x
             Control v_clamped = _g(v[k].row(t));
             x = _F(x, v_clamped);
 
-            // Adım maliyetini ekle
-            S(k) += _c(x) + param_gamma * u.row(t) * Sigma_inv * v[k].row(t).transpose();
+            // add stage cost
+            S(k) += _c(x) + param_gamma * u.row(t) * Sigma.inverse() * v[k].row(t).transpose();
         }
-        // Terminal maliyetini ekle
+        // add terminal cost
         S(k) += _phi(x);
     }
 
-    // Ağırlıkları hesapla
+    // compute information theoretic weights for each sample
     VectorXd w = _compute_weights(S);
 
-    // w_k * epsilon_k hesapla
+    // calculate w_k * epsilon_k
     MatrixXd w_epsilon = MatrixXd::Zero(T, dim_u);
-    for (int t = 0; t < T; ++t) {
+    for (int t = 0; t < T; ++t) { // loop for time step t = 0 ~ T-1
         for (int k = 0; k < K; ++k) {
             w_epsilon.row(t) += w(k) * epsilon.row(k * T + t);
         }
     }
     
-    // Hareketli ortalama filtresi
+    // apply moving average filter for smoothing input sequence
     w_epsilon = _moving_average_filter(w_epsilon, 10);
     
-    // Kontrol girdisi dizisini güncelle
+    // update control input sequence
     u += w_epsilon;
 
-    // Optimal yörüngeyi hesapla (Görselleştirme için)
+    // calculate optimal trajectory
     MatrixXd optimal_traj(T, dim_x);
     State x_opt = x0;
-    for (int t = 0; t < T; ++t) {
+    for (int t = 0; t < T; ++t) { // loop for time step t = 0 ~ T-1
         x_opt = _F(x_opt, _g(u.row(t)));
         optimal_traj.row(t) = x_opt;
     }
 
-    // Önceki kontrol girdisini güncelle (1 adım sola kaydır)
+    // update privious control input sequence (shift 1 step to the left)
     u_prev.block(0, 0, T - 1, dim_u) = u.block(1, 0, T - 1, dim_u);
-    u_prev.row(T - 1) = u.row(T - 1); // Son elemanı tekrarla
+    u_prev.row(T - 1) = u.row(T - 1); // Repeat last control input
 
-    // Optimal kontrol girdisini ve yörüngeyi döndür
     return std::make_tuple(u.row(0), optimal_traj);
 }
-
-// --- Yardımcı Fonksiyonlar ---
 
 State MPPIController::_F(const State& x_t, const Control& v_t) const {
     double x = x_t[0], y = x_t[1], yaw = x_t[2], v = x_t[3];
@@ -165,27 +162,26 @@ double MPPIController::_phi(const State& x_T) {
     return cost;
 }
 
+// Finds the nearest waypoint on the reference path
 Vector4d MPPIController::_get_nearest_waypoint(double x, double y, bool update_prev_idx) {
     
     const int SEARCH_IDX_LEN = 200; //[points] forward search range
     int end_idx = std::min(static_cast<int>(ref_path.rows()), prev_waypoints_idx + SEARCH_IDX_LEN);
 
-    // Python'daki dilimleme: ref_path[prev_idx:end_idx, 0:2]
-    MatrixXd search_segment = ref_path.block(prev_waypoints_idx, 0, end_idx - prev_waypoints_idx, 2);
+    MatrixXd search_segment = ref_path.block(prev_waypoints_idx, 0, end_idx - prev_waypoints_idx, 2); 
 
-    // (x, y) vektörünü segmentteki her satırdan çıkar
+    // Calculate distances to waypoints in the search segment
     Vector2d current_pos(x, y);
     MatrixXd diffs = search_segment.rowwise() - current_pos.transpose();
     
-    // Satırların karelerinin normu (mesafe kareleri)
+    // Compute squared norms
     VectorXd dist_sq = diffs.rowwise().squaredNorm();
 
-    // Minimum mesafenin indeksini bul
     VectorXd::Index min_idx;
     dist_sq.minCoeff(&min_idx);
     
     int nearest_idx = min_idx + prev_waypoints_idx;
-
+    // update nearest waypoint index if necessary
     if (update_prev_idx) {
         prev_waypoints_idx = nearest_idx;
     }
@@ -198,17 +194,14 @@ MatrixXd MPPIController::_calc_epsilon() {
     int total_samples = K * T;
     MatrixXd epsilon(total_samples, dim_u);
     
-    // Standart normal dağılımdan (0, 1) gürültü üret
+    // Sample from standard normal distribution
     MatrixXd std_normal_noise(total_samples, dim_u);
     for (int i = 0; i < total_samples; ++i) {
         for (int j = 0; j < dim_u; ++j) {
             std_normal_noise(i, j) = std_normal_dist(generator);
         }
     }
-
-    // Gürültüyü Cholesky ayrıştırması ile ölçeklendir: epsilon = std_noise * L^T
-    // (veya L * std_noise, L'nin nasıl tanımlandığına bağlı. Eigen'in llt() L*L^T verir)
-    // z = mu + L * w
+    // Transform to match desired covariance using Cholesky factor
     for (int i = 0; i < total_samples; ++i) {
         epsilon.row(i) = (cholesky_L * std_normal_noise.row(i).transpose()).transpose();
     }
@@ -218,15 +211,16 @@ MatrixXd MPPIController::_calc_epsilon() {
 
 VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
     VectorXd w(K);
-    double rho = S.minCoeff(); // S_min
+
+    // calculate rho
+    double rho = S.minCoeff();
     
-    VectorXd S_shifted = S.array() - rho;
-    VectorXd exp_term = (-1.0 / param_lambda * S_shifted).array().exp();
+    VectorXd exp_term = (-1.0 / param_lambda * (S.array() - rho)).array().exp();
     
-    double eta = exp_term.sum(); // Normalizasyon faktörü
+    double eta = exp_term.sum(); 
     
-    if (eta < 1e-9) { // Sıfıra bölmeyi engelle
-        w.fill(1.0 / K); // Eşit ağırlık ver
+    if (eta < 1e-9) { // Precision safeguard
+        w.fill(1.0 / K); // Uniform weights
     } else {
         w = exp_term / eta;
     }
@@ -234,7 +228,7 @@ VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
 }
 
 MatrixXd MPPIController::_moving_average_filter(const MatrixXd& xx, int window_size) const {
-    // Bu, np.convolve(mode="same") işleminin C++ karşılığıdır
+    
     MatrixXd xx_mean = MatrixXd::Zero(xx.rows(), xx.cols());
     int n = xx.rows();
     int half_window = window_size / 2;
@@ -252,10 +246,6 @@ MatrixXd MPPIController::_moving_average_filter(const MatrixXd& xx, int window_s
             }
         }
     }
-    // Not: Python'daki kod, kenarlarda daha karmaşık bir ağırlıklandırma yapıyor.
-    // Bu, basit bir 'valid' modlu hareketli ortalamadır ve çoğu durumda yeterlidir.
-    // Python'daki kodu birebir çevirmek için:
-    // https://stackoverflow.com/questions/2471625/python-numpy-convolve-boundary-effects
-    // Ancak bu basit haliyle başlamak daha iyidir.
+
     return xx_mean;
 }
