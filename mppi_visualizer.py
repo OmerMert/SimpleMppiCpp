@@ -3,6 +3,7 @@ import struct
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 from typing import Tuple
 
 # --- Vehicle Parameters ---
@@ -12,6 +13,11 @@ WHEEL_W = 0.4
 WHEEL_L = 0.7
 MAX_STEER_ABS = 0.523  # [rad]
 MAX_ACCEL_ABS = 2.000  # [m/s^2]
+
+OBSTACLES = [
+    (8.0, 5.0, 4.0), # x, y, radius
+    (18.0, -5.0, 4.0)
+]
 
 def affine_transform(xlist: list, ylist: list, angle: float, translation: list=[0.0, 0.0]) -> Tuple[list, list]:
     transformed_x = []
@@ -73,6 +79,17 @@ def update_animation(t, x, y, yaw, v, steer, accel):
     main_ax.set_xlim(x - 20.0, x + 20.0) # Follow the vehicle
     main_ax.set_ylim(y - 25.0, y + 25.0) # Follow the vehicle
     main_ax.axis('off')
+
+    # Draw Obstacles
+    for obs in OBSTACLES:
+        obs_x, obs_y, obs_r = obs
+        # Create Circle Patch
+        circle = patches.Circle((obs_x, obs_y), radius=obs_r, fc='white', ec='black', linewidth=2.0, zorder=0)
+        # Add Patch to Axes
+        main_ax.add_patch(circle)
+        # Add to Mini Map
+        circle_mini = patches.Circle((obs_x, obs_y), radius=obs_r, fc='white', ec='black', linewidth=2.0, zorder=0)
+        minimap_ax.add_patch(circle_mini)
     
     # Draw Reference Path (Global)
     main_ax.plot(ref_path[:, 0], ref_path[:, 1], color='black', linestyle="dashed", linewidth=1.5)

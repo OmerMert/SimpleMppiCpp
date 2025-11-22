@@ -11,11 +11,12 @@ MPPIController::MPPIController(
     const MatrixXd& ref_path, int horizon_step_T, int number_of_samples_K,
     double param_exploration, double param_lambda, double param_alpha,
     const Matrix2d& sigma, const Vector4d& stage_cost_weight,
-    const Vector4d& terminal_cost_weight)
+    const Vector4d& terminal_cost_weight,
+    const std::vector<Obstacle>& obstacles_param)
     : dt(delta_t), L(wheel_base), max_steer(max_steer_abs), max_accel(max_accel_abs),
       ref_path(ref_path), T(horizon_step_T), K(number_of_samples_K),
       param_exploration(param_exploration), param_lambda(param_lambda), param_alpha(param_alpha),
-      Sigma(sigma), stage_cost_weight(stage_cost_weight), terminal_cost_weight(terminal_cost_weight)
+      Sigma(sigma), stage_cost_weight(stage_cost_weight), terminal_cost_weight(terminal_cost_weight), obstacles(obstacles_param)
 {
     param_gamma = param_lambda * (1.0 - param_alpha);
     u_prev = MatrixXd::Zero(T, dim_u);
@@ -145,6 +146,9 @@ double MPPIController::_c(const State& x_t) {
                   stage_cost_weight[1] * std::pow(x_normalized[1] - ref_y, 2) +
                   stage_cost_weight[2] * std::pow(x_normalized[2] - ref_yaw, 2) +
                   stage_cost_weight[3] * std::pow(x_normalized[3] - ref_v, 2);
+
+    cost += _is_collided(x_t) * 1.0e10;
+
     return cost;
 }
 
@@ -159,6 +163,9 @@ double MPPIController::_phi(const State& x_T) {
                   terminal_cost_weight[1] * std::pow(x_normalized[1] - ref_y, 2) +
                   terminal_cost_weight[2] * std::pow(x_normalized[2] - ref_yaw, 2) +
                   terminal_cost_weight[3] * std::pow(x_normalized[3] - ref_v, 2);
+
+    cost += _is_collided(x_T) * 1.0e10;
+
     return cost;
 }
 
@@ -248,4 +255,43 @@ MatrixXd MPPIController::_moving_average_filter(const MatrixXd& xx, int window_s
     }
 
     return xx_mean;
+}
+
+double MPPIController::_is_collided(const State& x_t) {
+
+    // vehicle shape parameters
+    double vw = vehicle_width * safety_margin_rate;
+    double vl = vehicle_length * safety_margin_rate;
+
+    // get current states
+    double x = x_t[0];
+    double y = x_t[1];
+    double yaw = x_t[2];
+
+    // key points for collision check
+    std::vector<Eigen::Vector2d> local_points = {
+        {-0.5 * vl, -0.5 * vw}, {-0.5 * vl, 0.0}, {-0.5 * vl, +0.5 * vw}, 
+        { 0.0,      +0.5 * vw}, { 0.0,     -0.5 * vw}, { 0.0, 0.0},       
+        {+0.5 * vl, +0.5 * vw}, {+0.5 * vl, 0.0}, {+0.5 * vl, -0.5 * vw}  
+    };
+
+
+    // check if the key points are inside the obstacles
+    for (const auto& obs : obstacles) {
+        double obs_r_sq = obs.r * obs.r; 
+
+        for (const auto& p : local_points) {
+            
+            double global_px = (p.x() * std::cos(yaw) - p.y() * std::sin(yaw)) + x;
+            double global_py = (p.x() * std::sin(yaw) + p.y() * std::cos(yaw)) + y;
+
+            double dist_sq = std::pow(global_px - obs.x, 2) + std::pow(global_py - obs.y, 2);
+
+            if (dist_sq < obs_r_sq) {
+                return 1.0; // collided
+            }
+        }
+    }
+
+    return 0.0; // not collided
 }

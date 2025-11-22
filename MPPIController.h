@@ -15,6 +15,13 @@ using State = Vector4d;
 // Control vector: [steer, accel]
 using Control = Vector2d; 
 
+// Obstacle structure
+struct Obstacle {
+    double x;
+    double y;
+    double r;
+};
+
 class MPPIController {
 public:
     MPPIController(
@@ -30,7 +37,8 @@ public:
         double param_alpha,
         const Matrix2d& sigma,
         const Vector4d& stage_cost_weight,
-        const Vector4d& terminal_cost_weight
+        const Vector4d& terminal_cost_weight,
+        const std::vector<Obstacle>& obstacles
     );
 
     std::tuple<Control, MatrixXd> calc_control_input(const State& observed_x);
@@ -50,6 +58,10 @@ private:
     Matrix2d Sigma; // deviation of noise
     Vector4d stage_cost_weight;
     Vector4d terminal_cost_weight;
+    std::vector<Obstacle> obstacles;
+    double vehicle_width = 3.0;
+    double vehicle_length = 4.0;
+    double safety_margin_rate = 1.2;
 
     // Vehicle parameters
     double dt;
@@ -90,6 +102,8 @@ private:
     MatrixXd _moving_average_filter(const MatrixXd& xx, int window_size) const;
 
     double normalize_angle(double angle) const;
+
+    double _is_collided(const State& x_t);
 };
 
 #endif // MPPI_CONTROLLER_H

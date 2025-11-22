@@ -82,6 +82,12 @@ int main() {
 
     vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
 
+    // define obstacles
+    std::vector<Obstacle> defined_obstacles = {
+        { 8.0,  5.0, 4.0}, // Obstacle 1
+        {18.0, -5.0, 4.0}  // Obstacle 2
+    };
+
     // initialize a mppi controller for the vehicle
     MPPIController mppi(
         delta_t * 2.0, // delta_t [s]
@@ -96,13 +102,13 @@ int main() {
         0.98,          // param_alpha
         (Matrix2d() << 0.075, 0.0, 0.0, 2.0).finished(), // sigma
         Vector4d(50.0, 50.0, 1.0, 20.0), // stage_cost_weight [x, y, yaw, v]
-        Vector4d(50.0, 50.0, 1.0, 20.0)  // terminal_cost_weight [x, y, yaw, v]
+        Vector4d(50.0, 50.0, 1.0, 20.0),  // terminal_cost_weight [x, y, yaw, v]
+        defined_obstacles // obstacles
     );
 
-
-    //simulation loop
     SimDataPacket packet;
 
+    //simulation loop
     for (int i = 0; i < sim_steps; ++i) {
 
         // get current state of vehicle
