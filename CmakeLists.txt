@@ -1,9 +1,10 @@
-cmake_minimum_required(VERSION 3.10)
-project(MppiCpp)
+cmake_minimum_required(VERSION 3.24)
+project(MppiCpp LANGUAGES CXX CUDA)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR})
@@ -15,9 +16,12 @@ add_executable(MppiCpp
     Vehicle.cpp
     MppiController.cpp
     UDP.cpp
+    mppi_core.cu
 )
-
-# Include directories
+set_target_properties(MppiCpp PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+# Include directories For UDP
 if(WIN32)
   target_link_libraries(MppiCpp PUBLIC ws2_32)
 endif()

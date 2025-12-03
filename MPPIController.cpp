@@ -44,40 +44,61 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         throw std::out_of_range("End of the reference path.");
     }
 
-    // prepare buffer
-    VectorXd S = VectorXd::Zero(K); // state cost list
-    
-    // sample noise
-    MatrixXd epsilon = _calc_epsilon(); // size is K*T, dim_u
 
-    // prepare buffer of sampled control input sequence
-    std::vector<MatrixXd> v(K, MatrixXd(T, dim_u)); // control input sequence with noise
+    // 1. Gürültü Üretimi (Yine CPU'da yapalım şimdilik)
+    Eigen::MatrixXd epsilon = _calc_epsilon(); 
 
-    // loop for 0 ~ K-1 samples
-    for (int k = 0; k < K; ++k) {
-
-        // set initial(t=0) state x i.e. observed state of the vehicle
-        State x = x0;
-
-        // loop for time step t = 1 ~ T
-        for (int t = 0; t < T; ++t) {
-            
-            // get control input with noise
-            if (k < (1.0 - param_exploration) * K) {
-                v[k].row(t) = u.row(t) + epsilon.row(k * T + t); // sampling for exploitation
-            } else {
-                v[k].row(t) = epsilon.row(k * T + t); //  sampling for exploitation
-            }
-
-            // update x
-            Control v_clamped = _g(v[k].row(t));
-            x = _F(x, v_clamped);
-
-            // add stage cost
-            S(k) += _c(x) + param_gamma * u.row(t) * Sigma.inverse() * v[k].row(t).transpose();
+    // 2. Verileri GPU için hazırla (Flatten)
+    std::vector<float> h_noise(K * T * 2);
+    // Epsilon matrisini düz vektöre çevir
+    for(int k=0; k<K; ++k) {
+        for(int t=0; t<T; ++t) {
+            h_noise[k*T*2 + t*2 + 0] = (float)epsilon.row(k*T+t)[0]; // steer
+            h_noise[k*T*2 + t*2 + 1] = (float)epsilon.row(k*T+t)[1]; // accel
         }
-        // add terminal cost
-        S(k) += _phi(x);
+    }
+
+    std::vector<float> h_u_prev(T * 2);
+    // u_prev matrisini düz vektöre çevir
+    for(int t=0; t<T; ++t) {
+        h_u_prev[t*2 + 0] = (float)u_prev(t, 0);
+        h_u_prev[t*2 + 1] = (float)u_prev(t, 1);
+    }
+
+    // State'i hazırla
+    float h_initial_state[4] = {(float)x0[0], (float)x0[1], (float)x0[2], (float)x0[3]};
+
+    // Ref Path'i hazırla (Bunu aslında Constructor'da bir kere yapıp saklamak lazım)
+    int path_rows = ref_path.rows();
+    std::vector<float> h_ref_path(path_rows * 4);
+    for(int i=0; i<path_rows; ++i) {
+        h_ref_path[i*4+0] = (float)ref_path(i, 0);
+        h_ref_path[i*4+1] = (float)ref_path(i, 1);
+        h_ref_path[i*4+2] = (float)ref_path(i, 2);
+        h_ref_path[i*4+3] = (float)ref_path(i, 3);
+    }
+
+    // Çıktı için yer ayır
+    std::vector<float> h_costs(K);
+
+    // 3. GPU FONKSİYONUNU ÇAĞIR!
+    launch_mppi_gpu_wrapper(
+        h_initial_state,
+        h_u_prev.data(),
+        h_noise.data(),
+        h_ref_path.data(),
+        path_rows,
+        obstacles.data(), // std::vector<Obstacle> direkt uyumludur
+        obstacles.size(),
+        h_costs.data(),
+        K, T, dt,
+        prev_waypoints_idx
+    );
+
+    // 4. Sonuçları Kullan (S matrisini h_costs ile doldur)
+    Eigen::VectorXd S(K);
+    for(int k=0; k<K; ++k) {
+        S[k] = h_costs[k];
     }
 
     // compute information theoretic weights for each sample

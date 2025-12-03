@@ -8,7 +8,7 @@
 #include "Vehicle.h"
 #include "MPPIController.h"
 #include "UDP.h"
-
+#include <chrono>
 
 //Read CSV File
 MatrixXd loadRefPath(const std::string& filepath) {
@@ -111,6 +111,9 @@ int main() {
     //simulation loop
     for (int i = 0; i < sim_steps; ++i) {
 
+        using clock = std::chrono::steady_clock; // steady_clock preferable for timing
+        auto t0 = clock::now();
+
         // get current state of vehicle
         State current_state = vehicle.get_state();
 
@@ -133,6 +136,10 @@ int main() {
 
         // update states of vehicle
         vehicle.update(optimal_input, delta_t);
+
+        auto t1 = clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        std::cout << "Time: " << elapsed << " ms\n";
 
         // --- send UDP data ---
         packet.time = t;

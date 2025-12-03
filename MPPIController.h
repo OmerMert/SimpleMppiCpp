@@ -22,6 +22,20 @@ struct Obstacle {
     double r;
 };
 
+
+extern "C" void launch_mppi_gpu_wrapper(
+    const float* h_initial_state,
+    const float* h_u_prev,
+    const float* h_noise,
+    const float* h_ref_path,
+    int path_size,
+    const Obstacle* h_obstacles,
+    int num_obs,
+    float* h_costs,
+    int K, int T, float dt,
+    int prev_idx
+);
+
 class MPPIController {
 public:
     MPPIController(
