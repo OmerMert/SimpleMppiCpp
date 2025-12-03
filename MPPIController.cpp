@@ -2,6 +2,7 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <omp.h>
 
 #define M_PI       3.14159265358979323846
 
@@ -53,6 +54,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     // prepare buffer of sampled control input sequence
     std::vector<MatrixXd> v(K, MatrixXd(T, dim_u)); // control input sequence with noise
 
+    #pragma omp parallel for
     // loop for 0 ~ K-1 samples
     for (int k = 0; k < K; ++k) {
 

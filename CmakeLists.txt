@@ -5,6 +5,8 @@ project(MppiCpp)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
+find_package(OpenMP REQUIRED)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR})
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR})
@@ -20,4 +22,8 @@ add_executable(MppiCpp
 # Include directories
 if(WIN32)
   target_link_libraries(MppiCpp PUBLIC ws2_32)
+endif()
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(MppiCpp PUBLIC OpenMP::OpenMP_CXX)
 endif()
