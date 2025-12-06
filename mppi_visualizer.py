@@ -24,25 +24,23 @@ def load_config(file_path):
         with open(file_path, 'r') as f:
             data = json.load(f)
             
-        # Araç Sabitlerini Atama
+        # Vehicle Config
         vehicle_config = data["VEHICLE_CONFIG"]
         VEHICLE_W = vehicle_config["W"]
         VEHICLE_L = vehicle_config["L"]
         WHEEL_W = vehicle_config["WHEEL_W"]
         WHEEL_L = vehicle_config["WHEEL_L"]
         
-        # Diğer Sabitleri Atama
         MAX_STEER_ABS = data["max_steer_abs"]
         MAX_ACCEL_ABS = data["max_accel_abs"]
 
-        # Engel Listesini Atama
         OBSTACLES = [tuple(obs) for obs in data["OBSTACLES"]]
         
-        print("Konfigürasyon başarıyla yüklendi ve global modülde saklandı.")
+        print("Config loaded successfully.")
         return True
 
     except Exception as e:
-        print(f"HATA: Konfigürasyon yüklenemedi: {e}")
+        print(f"[ERROR] Config can not loaded: {e}")
         return False
 
 def affine_transform(xlist: list, ylist: list, angle: float, translation: list=[0.0, 0.0]) -> Tuple[list, list]:
