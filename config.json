@@ -1,0 +1,26 @@
+{
+    "delta_t": 0.05,
+    "wheel_base": 2.5,
+    "max_steer_abs": 0.523,
+    "max_accel_abs": 2.0,
+    "horizon_step_T": 20,
+    "number_of_samples_K": 100,
+    "param_exploration": 0.0,
+    "param_lambda": 100.0,
+    "param_alpha": 0.98,
+    "sigma": [[0.075, 0.0], [0.0, 2.0]],
+    "stage_cost_weight": [50.0, 50.0, 1.0, 20.0],
+    "terminal_cost_weight": [50.0, 50.0, 1.0, 20.0],
+
+    "VEHICLE_CONFIG": {
+    "W": 3.0,
+    "L": 4.0,
+    "WHEEL_W": 0.4,
+    "WHEEL_L": 0.7
+    },
+
+    "OBSTACLES": [
+        [8.0, 5.0, 4.0],
+        [18.0, -5.0, 4.0]
+    ]
+}
