@@ -6,6 +6,9 @@ if exist build (
     rd /s /q build
 )
 
+del /Q *.exe
+del /Q *.pdb
+
 REM 2. Create build directory
 mkdir build
 cd build
@@ -29,6 +32,8 @@ REM Wait for a moment to ensure the executable is ready
 timeout /t 2 >nul 
 
 if exist MppiCpp.exe (
+
+    
     start "controller" MppiCpp.exe
 ) else (
     echo Error: Executable object is not exist!
