@@ -9,6 +9,63 @@
 #include "MPPIController.h"
 #include "UDP.h"
 
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
+double delta_t;
+double wheel_base;
+double max_steer_abs;
+double max_accel_abs;
+int horizon_step_T;
+int number_of_samples_K;
+double param_exploration;
+double param_lambda;
+double param_alpha;
+
+Matrix2d sigma;
+Vector4d stage_cost_weight;
+Vector4d terminal_cost_weight;
+std::vector<Obstacle> defined_obstacles;
+
+void ReadConfig() {
+
+    std::ifstream f("config.json");
+    json cfg = json::parse(f);
+
+    delta_t        = cfg["delta_t"];
+    wheel_base     = cfg["wheel_base"];
+    max_steer_abs  = cfg["max_steer_abs"];
+    max_accel_abs  = cfg["max_accel_abs"];
+
+    horizon_step_T     = cfg["horizon_step_T"];
+    number_of_samples_K = cfg["number_of_samples_K"];
+
+    param_exploration = cfg["param_exploration"];
+    param_lambda      = cfg["param_lambda"];
+    param_alpha       = cfg["param_alpha"];
+
+    sigma << cfg["sigma"][0][0], cfg["sigma"][0][1],
+             cfg["sigma"][1][0], cfg["sigma"][1][1];
+
+    stage_cost_weight << cfg["stage_cost_weight"][0],
+                         cfg["stage_cost_weight"][1],
+                         cfg["stage_cost_weight"][2],
+                         cfg["stage_cost_weight"][3];
+
+    terminal_cost_weight << cfg["terminal_cost_weight"][0],
+                            cfg["terminal_cost_weight"][1],
+                            cfg["terminal_cost_weight"][2],
+                            cfg["terminal_cost_weight"][3];
+
+    for (auto& ob : cfg["OBSTACLES"]) {
+        Obstacle o;
+        o.x = ob[0];
+        o.y = ob[1];
+        o.r = ob[2];
+        defined_obstacles.push_back(o);
+    }
+}
+
 
 //Read CSV File
 MatrixXd loadRefPath(const std::string& filepath) {
@@ -59,7 +116,6 @@ int main() {
     std::cout << "[INFO] UDP sender 127.0.0.1:5005 is set." << std::endl;
 
     // --- Simulation settings ---
-    double delta_t = 0.05; // [sec]
     int sim_steps = 800;  // [steps]
     std::cout << "[INFO] delta_t : " << delta_t << "[s] , sim_steps : " << sim_steps << "[steps], total_sim_time : " << delta_t * sim_steps << "[s]" << std::endl;
 
@@ -73,36 +129,34 @@ int main() {
         return 1;
     }
 
+    // --- read config file ---
+    ReadConfig();
+
     // initialize a vehicle as a control target
     Vehicle vehicle(
-        2.5,   // wheel_base
-        0.523, // max_steer_abs [rad]
-        2.000  // max_accel_abs [m/s^2]
+        wheel_base,   // wheel_base
+        max_steer_abs, // max_steer_abs [rad]
+        max_accel_abs // max_accel_abs [m/s^2]
     );
 
     vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
 
-    // define obstacles
-    std::vector<Obstacle> defined_obstacles = {
-        { 8.0,  5.0, 4.0}, // Obstacle 1
-        {18.0, -5.0, 4.0}  // Obstacle 2
-    };
 
     // initialize a mppi controller for the vehicle
     MPPIController mppi(
         delta_t * 2.0, // delta_t [s]
-        2.5,           // wheel_base [m]
-        0.523,         // max_steer_abs [rad]
-        2.000,         // max_accel_abs [m/s^2]
+        wheel_base,           // wheel_base [m]
+        max_steer_abs,         // max_steer_abs [rad]
+        max_accel_abs,         // max_accel_abs [m/s^2]
         ref_path,      // ref_path, size is <num_of_waypoints x 2>
-        20,            // horizon_step_T [steps]
-        100,           // number_of_samples_K [samples]
-        0.0,           // param_exploration
-        100.0,         // param_lambda
-        0.98,          // param_alpha
-        (Matrix2d() << 0.075, 0.0, 0.0, 2.0).finished(), // sigma
-        Vector4d(50.0, 50.0, 1.0, 20.0), // stage_cost_weight [x, y, yaw, v]
-        Vector4d(50.0, 50.0, 1.0, 20.0),  // terminal_cost_weight [x, y, yaw, v]
+        horizon_step_T,            // horizon_step_T [steps]
+        number_of_samples_K,           // number_of_samples_K [samples]
+        param_exploration,           // param_exploration
+        param_lambda,         // param_lambda
+        param_alpha,          // param_alpha
+        sigma, // sigma
+        stage_cost_weight, // stage_cost_weight [x, y, yaw, v]
+        terminal_cost_weight,  // terminal_cost_weight [x, y, yaw, v]
         defined_obstacles // obstacles
     );
 
