@@ -166,7 +166,7 @@ int main() {
     //simulation loop
     for (int i = 0; i < sim_steps; ++i) {
 
-        using clock = std::chrono::steady_clock; // steady_clock preferable for timing
+        using clock = std::chrono::steady_clock; 
         auto t0 = clock::now();
 
         // get current state of vehicle
@@ -205,8 +205,8 @@ int main() {
         packet.steer = optimal_input[0];
         packet.accel = optimal_input[1];
 
+        
         sendUDPData(udpSocket, destAddr, packet);
-
 
     }
 

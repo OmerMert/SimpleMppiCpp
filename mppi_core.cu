@@ -1,16 +1,65 @@
-// mppi_core.cu
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdio.h>
 
-// Yapılarımızı burada tekrar tanımlayalım (veya ortak bir .h dosyasından çekelim)
 struct Obstacle {
     float x, y, r;
 };
 
-// --- YARDIMCI FONKSİYONLAR (GPU İÇİN __device__) ---
+// Vehicle parameters
+#define WHEELBASE 4.0f
+#define MAX_STEER 0.523f
+#define MAX_ACCEL 2.0f
+#define SAFETY_MARGIN 1.2f
+#define vehicle_width 3.0f
+#define vehicle_length 4.0f
 
-// En yakın nokta bulma (Basitleştirilmiş GPU versiyonu)
+__device__ void update_state_gpu(
+    float* x, float* y, float* yaw, float* v, 
+    float steer, float accel, float dt
+) {
+    float current_x = *x;
+    float current_y = *y;
+    float current_yaw = *yaw;
+    float current_v = *v;
+
+    *x = current_x + current_v * cosf(current_yaw) * dt;
+    *y = current_y + current_v * sinf(current_yaw) * dt;
+    *yaw = current_yaw + current_v / WHEELBASE * tanf(steer) * dt;
+    *v = current_v + accel * dt;
+}
+
+__device__ bool check_collision_gpu(
+    float x, float y, float yaw, 
+    const Obstacle* obstacles, int num_obs) {
+    
+    // vehicle shape parameters
+    float vw = vehicle_width * SAFETY_MARGIN;
+    float vl = vehicle_length * SAFETY_MARGIN;
+    
+    // key points for collision check
+    float local_x[9] = {-0.5f*vl, -0.5f*vl, -0.5f*vl,  0.0f,      0.0f,     0.0f,     0.5f*vl, 0.5f*vl, 0.5f*vl};
+    float local_y[9] = {-0.5f*vw,  0.0f,     0.5f*vw,  0.5f*vw,  -0.5f*vw,  0.0f,     0.5f*vw, 0.0f,   -0.5f*vw};
+
+    // check if the key points are inside the obstacles
+    for(int i = 0; i < num_obs; ++i) {
+
+        float r_sq = obstacles[i].r * obstacles[i].r;
+
+        for(int p = 0; p < 9; ++p) {
+            float global_px = (local_x[p] * cosf(yaw) - local_y[p] * sinf(yaw)) + x;
+            float global_py = (local_x[p] * sinf(yaw) + local_y[p] * cosf(yaw)) + y;
+
+            float dist_sq = (global_px - obstacles[i].x)*(global_px - obstacles[i].x) + (global_py - obstacles[i].y)*(global_py - obstacles[i].y);
+
+            if(dist_sq < r_sq) {
+                return true; // collided
+            }
+        }
+    }
+    return false;
+}
+
 __device__ void get_nearest_waypoint_gpu(
     float x, float y, 
     const float* path_points, int path_size, 
@@ -19,74 +68,52 @@ __device__ void get_nearest_waypoint_gpu(
 ) {
     float min_dist_sq = 1e10f;
     int nearest = prev_idx;
-    int search_len = 200; // Arama aralığı
-
-    // Sınırları kontrol et
-    int end_idx = (prev_idx + search_len < path_size) ? prev_idx + search_len : path_size;
+    
+    int SEARCH_IDX_LEN = 200; 
+    int end_idx = (prev_idx + SEARCH_IDX_LEN < path_size) ? prev_idx + SEARCH_IDX_LEN : path_size;
 
     for(int i = prev_idx; i < end_idx; ++i) {
-        float dx = x - path_points[i * 4 + 0]; // 0: x
-        float dy = y - path_points[i * 4 + 1]; // 1: y
+        float px = path_points[i * 4 + 0];
+        float py = path_points[i * 4 + 1];
+        
+        float dx = x - px;
+        float dy = y - py;
         float d_sq = dx*dx + dy*dy;
+        
         if(d_sq < min_dist_sq) {
             min_dist_sq = d_sq;
             nearest = i;
         }
     }
 
-    *ref_x = path_points[nearest * 4 + 0];
-    *ref_y = path_points[nearest * 4 + 1];
+    *ref_x   = path_points[nearest * 4 + 0];
+    *ref_y   = path_points[nearest * 4 + 1];
     *ref_yaw = path_points[nearest * 4 + 2];
-    *ref_v = path_points[nearest * 4 + 3];
+    *ref_v   = path_points[nearest * 4 + 3];
 }
 
-// Çarpışma Kontrolü
-__device__ bool check_collision_gpu(float x, float y, float yaw, const Obstacle* obstacles, int num_obs) {
-    // Araç boyutları (Sabit kabul ediyoruz)
-    float vl = 4.0f * 1.2f; // Safety margin dahil
-    float vw = 3.0f * 1.2f;
-    
-    // Basitlik için sadece 3 noktayı kontrol edelim (Ön, Orta, Arka)
-    float local_pts_x[3] = {vl/2.0f, 0.0f, -vl/2.0f};
-    
-    for(int i=0; i<num_obs; ++i) {
-        float obs_x = obstacles[i].x;
-        float obs_y = obstacles[i].y;
-        float r_sq = obstacles[i].r * obstacles[i].r;
-
-        for(int p=0; p<3; ++p) {
-            // Döndür ve ötele
-            float gx = x + (local_pts_x[p] * cosf(yaw));
-            float gy = y + (local_pts_x[p] * sinf(yaw));
-            
-            float dx = gx - obs_x;
-            float dy = gy - obs_y;
-            
-            if (dx*dx + dy*dy < r_sq) return true;
-        }
-    }
-    return false;
-}
-
-// --- ANA GPU KERNEL ---
 __global__ void mppi_rollout_kernel(
     const float* initial_state, // [x, y, yaw, v]
-    const float* u_prev,        // [steer, accel] * T
-    const float* noise,         // [steer, accel] * K * T
-    const float* ref_path,      // [x, y, yaw, v] * PathSize
+    const float* u_prev,        // [steer, accel] x T 
+    const float* noise,         // [steer, accel] x K x T 
+    const float* ref_path,      
     int path_size,
-    const Obstacle* obstacles,
+    const Obstacle* obstacles,  
     int num_obs,
-    float* costs,               // Çıktı: Her sample için maliyet
+    float* costs,               
     int K, int T, float dt,
-    int prev_waypoint_idx
+    int prev_waypoint_idx,
+    float param_exploration,
+    float w_x, float w_y, float w_yaw, float w_v,
+    float term_w_x, float term_w_y, float term_w_yaw, float term_w_v,
+    float param_gamma,
+    float inv_sigma_steer, // 1.0 / Sigma[0,0]
+    float inv_sigma_accel  // 1.0 / Sigma[1,1]
 ) {
-    // Ben hangi işçiyim? (Sample Index)
+    
     int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= K) return; 
 
-    if (k >= K) return;
-
-    // Yerel durum değişkenleri
     float x = initial_state[0];
     float y = initial_state[1];
     float yaw = initial_state[2];
@@ -94,57 +121,81 @@ __global__ void mppi_rollout_kernel(
 
     float total_cost = 0.0f;
 
-    // Simülasyon Döngüsü (T adım)
+    int exploitation_count = (int)((1.0f - param_exploration) * K);
+    bool is_exploration = (k >= exploitation_count);
+
+
     for (int t = 0; t < T; ++t) {
-        // 1. Kontrol Girdisini Hazırla
-        // noise dizini: k * (T * 2) + t * 2
-        int noise_idx = k * T * 2 + t * 2;
+
+        int idx = k * T * 2 + t * 2;
         int u_idx = t * 2;
 
-        float noise_steer = noise[noise_idx + 0];
-        float noise_accel = noise[noise_idx + 1];
+        float n_steer = noise[idx + 0];
+        float n_accel = noise[idx + 1];
 
-        // u + epsilon
-        float steer = u_prev[u_idx + 0] + noise_steer;
-        float accel = u_prev[u_idx + 1] + noise_accel;
+        float u_prev_steer = u_prev[u_idx + 0];
+        float u_prev_accel = u_prev[u_idx + 1];
+
+        float steer, accel;
+
+        if (is_exploration) {
+            // Sadece gürültü (Keşif)
+            steer = n_steer;
+            accel = n_accel;
+        } else {
+            // Önceki plan + gürültü (Sömürü)
+            steer = u_prev[u_idx + 0] + n_steer;
+            accel = u_prev[u_idx + 1] + n_accel;
+        }
 
         // Clamp (Sınırla)
-        if(steer > 0.523f) steer = 0.523f;
-        if(steer < -0.523f) steer = -0.523f;
-        if(accel > 2.0f) accel = 2.0f;
-        if(accel < -2.0f) accel = -2.0f;
+        if(steer > MAX_STEER) steer = MAX_STEER;
+        if(steer < -MAX_STEER) steer = -MAX_STEER;
+        if(accel > MAX_ACCEL) accel = MAX_ACCEL;
+        if(accel < -MAX_ACCEL) accel = -MAX_ACCEL;
 
-        // 2. Kinematik Model (Vehicle Update)
-        x += v * cosf(yaw) * dt;
-        y += v * sinf(yaw) * dt;
-        yaw += v / 2.5f * tanf(steer) * dt; // 2.5 = wheelbase
-        v += accel * dt;
+        // Durumu Güncelle (_F)
+        update_state_gpu(&x, &y, &yaw, &v, steer, accel, dt);
 
-        // 3. Maliyet Hesabı (Stage Cost)
+        // Stage Cost (_c)
         float rx, ry, ryaw, rv;
         get_nearest_waypoint_gpu(x, y, ref_path, path_size, prev_waypoint_idx, &rx, &ry, &ryaw, &rv);
         
-        // Ağırlıklar (Basitlik için sabit yazdım, parametre olarak geçilebilir)
-        float cost = 50.0f*(x-rx)*(x-rx) + 50.0f*(y-ry)*(y-ry) + 1.0f*(yaw-ryaw)*(yaw-ryaw) + 20.0f*(v-rv)*(v-rv);
+        float stage_cost = w_x*(x-rx)*(x-rx) + w_y*(y-ry)*(y-ry) + w_yaw*(yaw-ryaw)*(yaw-ryaw) + w_v*(v-rv)*(v-rv);
 
         // Çarpışma Cezası
         if(check_collision_gpu(x, y, yaw, obstacles, num_obs)) {
-            cost += 1000000.0f;
+            stage_cost += 1000000000.0f; 
         }
 
-        // Kontrol Maliyeti (Control Cost - Simplified)
-        // lambda(1-alpha) * u' * Sigma^-1 * v ...
-        // Bu kısmı tam formüle göre eklemek gerekir, şimdilik basit tuttum.
+        float control_cost = 0.0f;
+        if (!is_exploration) {
+            control_cost = param_gamma * (
+                u_prev_steer * steer * inv_sigma_steer + 
+                u_prev_accel * accel * inv_sigma_accel
+            );
+        }
         
-        total_cost += cost;
+        total_cost += stage_cost + control_cost;
     }
 
-    // Sonucu global belleğe yaz
+    float rx, ry, ryaw, rv;
+    get_nearest_waypoint_gpu(x, y, ref_path, path_size, prev_waypoint_idx, &rx, &ry, &ryaw, &rv);
+
+    float terminal_cost = term_w_x*(x-rx)*(x-rx) + term_w_y*(y-ry)*(y-ry) + term_w_yaw*(yaw-ryaw)*(yaw-ryaw) + term_w_v*(v-rv)*(v-rv);
+
+    if(check_collision_gpu(x, y, yaw, obstacles, num_obs)) {
+        terminal_cost += 1000000000.0f;
+    }
+
+    total_cost += terminal_cost;
+
     costs[k] = total_cost;
 }
 
-// --- C++'tan Çağırılacak "Wrapper" Fonksiyon ---
-extern "C" void launch_mppi_gpu_wrapper(
+
+
+extern "C" void launch_mppi_gpu(
     const float* h_initial_state,
     const float* h_u_prev,
     const float* h_noise,
@@ -152,52 +203,47 @@ extern "C" void launch_mppi_gpu_wrapper(
     int path_size,
     const Obstacle* h_obstacles,
     int num_obs,
-    float* h_costs,
+    float* h_costs, 
     int K, int T, float dt,
-    int prev_idx
+    int prev_idx,
+    float param_exploration,
+    float w_x, float w_y, float w_yaw, float w_v,
+    float term_w_x, float term_w_y, float term_w_yaw, float term_w_v,
+    float param_gamma, float inv_sigma_steer, float inv_sigma_accel
 ) {
-    // 1. GPU Belleği Ayır (Malloc)
-    // Gerçek uygulamada bunları her döngüde yapmamalı,
-    // Class içinde bir kez yapıp saklamalıyız.
-    // Ancak eğitim amaçlı buraya koyuyorum.
+    float *d_state, *d_u, *d_noise, *d_path, *d_costs;
+    Obstacle *d_obs;
     
-    float *d_initial_state, *d_u_prev, *d_noise, *d_ref_path, *d_costs;
-    Obstacle *d_obstacles;
-
-    cudaMalloc(&d_initial_state, 4 * sizeof(float));
-    cudaMalloc(&d_u_prev, T * 2 * sizeof(float));
+    cudaMalloc(&d_state, 4 * sizeof(float));
+    cudaMalloc(&d_u, T * 2 * sizeof(float));
     cudaMalloc(&d_noise, K * T * 2 * sizeof(float));
-    cudaMalloc(&d_ref_path, path_size * 4 * sizeof(float));
+    cudaMalloc(&d_path, path_size * 4 * sizeof(float));
     cudaMalloc(&d_costs, K * sizeof(float));
-    cudaMalloc(&d_obstacles, num_obs * sizeof(Obstacle));
+    cudaMalloc(&d_obs, num_obs * sizeof(Obstacle));
 
-    // 2. Veriyi Kopyala (Host -> Device)
-    cudaMemcpy(d_initial_state, h_initial_state, 4 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_u_prev, h_u_prev, T * 2 * sizeof(float), cudaMemcpyHostToDevice);
+   
+    cudaMemcpy(d_state, h_initial_state, 4 * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_u, h_u_prev, T * 2 * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_noise, h_noise, K * T * 2 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_ref_path, h_ref_path, path_size * 4 * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_obstacles, h_obstacles, num_obs * sizeof(Obstacle), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_path, h_ref_path, path_size * 4 * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_obs, h_obstacles, num_obs * sizeof(Obstacle), cudaMemcpyHostToDevice);
 
-    // 3. Kernel'i Başlat
+    
     int threadsPerBlock = 256;
     int blocksPerGrid = (K + threadsPerBlock - 1) / threadsPerBlock;
     
     mppi_rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
-        d_initial_state, d_u_prev, d_noise, d_ref_path, path_size,
-        d_obstacles, num_obs, d_costs, K, T, dt, prev_idx
+        d_state, d_u, d_noise, d_path, path_size, d_obs, num_obs, d_costs,
+        K, T, dt, prev_idx, param_exploration,
+        w_x, w_y, w_yaw, w_v,
+        term_w_x, term_w_y, term_w_yaw, term_w_v,
+        param_gamma, inv_sigma_steer, inv_sigma_accel
     );
     
-    // Hata kontrolü
     cudaDeviceSynchronize();
 
-    // 4. Sonucu Geri Al (Device -> Host)
     cudaMemcpy(h_costs, d_costs, K * sizeof(float), cudaMemcpyDeviceToHost);
 
-    // 5. Temizlik
-    cudaFree(d_initial_state);
-    cudaFree(d_u_prev);
-    cudaFree(d_noise);
-    cudaFree(d_ref_path);
-    cudaFree(d_costs);
-    cudaFree(d_obstacles);
+    cudaFree(d_state); cudaFree(d_u); cudaFree(d_noise); 
+    cudaFree(d_path); cudaFree(d_costs); cudaFree(d_obs);
 }

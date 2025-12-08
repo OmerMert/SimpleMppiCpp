@@ -44,13 +44,11 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         throw std::out_of_range("End of the reference path.");
     }
 
-
-    // 1. Gürültü Üretimi (Yine CPU'da yapalım şimdilik)
+    // Noise matrix generation
     Eigen::MatrixXd epsilon = _calc_epsilon(); 
 
-    // 2. Verileri GPU için hazırla (Flatten)
+    // Flatten the epsilon matrix for GPU
     std::vector<float> h_noise(K * T * 2);
-    // Epsilon matrisini düz vektöre çevir
     for(int k=0; k<K; ++k) {
         for(int t=0; t<T; ++t) {
             h_noise[k*T*2 + t*2 + 0] = (float)epsilon.row(k*T+t)[0]; // steer
@@ -58,14 +56,14 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         }
     }
 
+    // Flatten u_prev for GPU
     std::vector<float> h_u_prev(T * 2);
-    // u_prev matrisini düz vektöre çevir
     for(int t=0; t<T; ++t) {
         h_u_prev[t*2 + 0] = (float)u_prev(t, 0);
         h_u_prev[t*2 + 1] = (float)u_prev(t, 1);
     }
 
-    // State'i hazırla
+    // Initial state for GPU
     float h_initial_state[4] = {(float)x0[0], (float)x0[1], (float)x0[2], (float)x0[3]};
 
     // Ref Path'i hazırla (Bunu aslında Constructor'da bir kere yapıp saklamak lazım)
@@ -80,19 +78,27 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
 
     // Çıktı için yer ayır
     std::vector<float> h_costs(K);
+    float inv_sigma_steer = 1.0f / (float)Sigma(0,0);
+    float inv_sigma_accel = 1.0f / (float)Sigma(1,1);
 
-    // 3. GPU FONKSİYONUNU ÇAĞIR!
-    launch_mppi_gpu_wrapper(
+    // Run GPU Kernel
+    launch_mppi_gpu(
         h_initial_state,
         h_u_prev.data(),
         h_noise.data(),
         h_ref_path.data(),
         path_rows,
-        obstacles.data(), // std::vector<Obstacle> direkt uyumludur
+        obstacles.data(),
         obstacles.size(),
         h_costs.data(),
         K, T, dt,
-        prev_waypoints_idx
+        prev_waypoints_idx,
+        (float)param_exploration,
+        // Stage Cost Weights
+        (float)stage_cost_weight[0], (float)stage_cost_weight[1], (float)stage_cost_weight[2], (float)stage_cost_weight[3],
+        (float)terminal_cost_weight[0], (float)terminal_cost_weight[1], (float)terminal_cost_weight[2], (float)terminal_cost_weight[3],
+        // Control Cost Params (BUNLAR EKLENDİ)
+        param_gamma, inv_sigma_steer, inv_sigma_accel
     );
 
     // 4. Sonuçları Kullan (S matrisini h_costs ile doldur)
