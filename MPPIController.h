@@ -17,9 +17,9 @@ using Control = Vector2d;
 
 // Obstacle structure
 struct Obstacle {
-    double x;
-    double y;
-    double r;
+    float x;
+    float y;
+    float r;
 };
 
 
@@ -34,10 +34,12 @@ extern "C" void launch_mppi_gpu(
     float* h_costs,
     int K, int T, float dt,
     int prev_idx,
-    float param_exploration, // YENİ
-    float w_x, float w_y, float w_yaw, float w_v, // YENİ
+    float param_exploration, 
+    float w_x, float w_y, float w_yaw, float w_v,
     float term_w_x, float term_w_y, float term_w_yaw, float term_w_v,
-    float param_gamma, float inv_sigma_steer, float inv_sigma_accel
+    float param_gamma, float inv_sigma_steer, float inv_sigma_accel,
+        float max_steer, float max_accel, float wheelbase,
+    float vehicle_w_param, float vehicle_l_param, float safety_margin
 );
 
 class MPPIController {

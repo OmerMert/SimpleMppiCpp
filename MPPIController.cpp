@@ -91,14 +91,16 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         obstacles.data(),
         obstacles.size(),
         h_costs.data(),
-        K, T, dt,
+        K, T, (float)dt,
         prev_waypoints_idx,
         (float)param_exploration,
         // Stage Cost Weights
         (float)stage_cost_weight[0], (float)stage_cost_weight[1], (float)stage_cost_weight[2], (float)stage_cost_weight[3],
         (float)terminal_cost_weight[0], (float)terminal_cost_weight[1], (float)terminal_cost_weight[2], (float)terminal_cost_weight[3],
-        // Control Cost Params (BUNLAR EKLENDİ)
-        param_gamma, inv_sigma_steer, inv_sigma_accel
+
+        param_gamma, inv_sigma_steer, inv_sigma_accel,
+        (float)max_steer, (float)max_accel, (float)L,
+        (float)vehicle_width, (float)vehicle_length, (float)safety_margin_rate
     );
 
     // 4. Sonuçları Kullan (S matrisini h_costs ile doldur)
@@ -119,7 +121,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     }
     
     // apply moving average filter for smoothing input sequence
-    w_epsilon = _moving_average_filter(w_epsilon, 10);
+    w_epsilon = _moving_average_filter(w_epsilon, 3);
     
     // update control input sequence
     u += w_epsilon;
@@ -132,10 +134,15 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         optimal_traj.row(t) = x_opt;
     }
 
-    // update privious control input sequence (shift 1 step to the left)
-    u_prev.block(0, 0, T - 1, dim_u) = u.block(1, 0, T - 1, dim_u);
-    u_prev.row(T - 1) = u.row(T - 1); // Repeat last control input
+    // Control input'u fiziksel limitlere göre clamp'leyin
+    u(0, 0) = std::clamp(u(0, 0), -max_steer, max_steer);
+    u(0, 1) = std::clamp(u(0, 1), -max_accel, max_accel);
 
+    // update previous control input sequence
+    u_prev.block(0, 0, T - 1, dim_u) = u.block(1, 0, T - 1, dim_u);
+    u_prev.row(T - 1) = u.row(T - 1);
+
+    // Return ederken clamp'lenmiş değeri gönderin
     return std::make_tuple(u.row(0), optimal_traj);
 }
 
@@ -164,6 +171,7 @@ double MPPIController::normalize_angle(double angle) const {
 
 double MPPIController::_c(const State& x_t) {
     Vector4d ref = _get_nearest_waypoint(x_t[0], x_t[1]);
+    
     double ref_x = ref[0], ref_y = ref[1], ref_yaw = ref[2], ref_v = ref[3];
     
     State x_normalized = x_t;
@@ -248,7 +256,7 @@ VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
 
     // calculate rho
     double rho = S.minCoeff();
-    
+
     VectorXd exp_term = (-1.0 / param_lambda * (S.array() - rho)).array().exp();
     
     double eta = exp_term.sum(); 

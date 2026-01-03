@@ -204,7 +204,7 @@ int main() {
         packet.v = current_state[3];
         packet.steer = optimal_input[0];
         packet.accel = optimal_input[1];
-
+        
         
         sendUDPData(udpSocket, destAddr, packet);
 
@@ -212,6 +212,6 @@ int main() {
 
     cleanupUDPSender(udpSocket);
     std::cout << "[INFO] Simulation is done." << std::endl;
-
+    int a = std::cin.get();
     return 0;
 }

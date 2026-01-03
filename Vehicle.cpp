@@ -30,4 +30,6 @@ void Vehicle::update(const Control& u, double delta_t) {
     state[1] = y + v * std::sin(yaw) * delta_t; //new y
     state[2] = yaw + v / L * std::tan(steer) * delta_t; //new yaw
     state[3] = v + accel * delta_t; //new v
+
+    if (state[3] < 0.0) state[3] = 0.0;
 }
