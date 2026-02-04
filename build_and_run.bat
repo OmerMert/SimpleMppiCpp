@@ -29,7 +29,7 @@ cd ..
 start "simulator" python mppi_visualizer.py
 
 REM Wait for a moment to ensure the executable is ready
-timeout /t 2 >nul 
+timeout /t 5 >nul 
 
 if exist MppiCpp.exe (
 

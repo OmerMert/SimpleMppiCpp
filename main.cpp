@@ -23,6 +23,11 @@ double param_exploration;
 double param_lambda;
 double param_alpha;
 
+//CBF Parameters
+float influence_radius;
+float cbf_weight;
+float decay_rate;
+
 Matrix2d sigma;
 Vector4d stage_cost_weight;
 Vector4d terminal_cost_weight;
@@ -65,6 +70,10 @@ void ReadConfig() {
         o.r = ob[2];
         defined_obstacles.push_back(o);
     }
+
+    influence_radius = cfg["CBF_PARAMETERS"]["influence_radius"];
+    cbf_weight       = cfg["CBF_PARAMETERS"]["cbf_weight"];
+    decay_rate       = cfg["CBF_PARAMETERS"]["decay_rate"];
 }
 
 
@@ -158,7 +167,10 @@ int main() {
         sigma, // sigma
         stage_cost_weight, // stage_cost_weight [x, y, yaw, v]
         terminal_cost_weight,  // terminal_cost_weight [x, y, yaw, v]
-        defined_obstacles // obstacles
+        defined_obstacles, // obstacles
+        influence_radius,
+        cbf_weight,
+        decay_rate
     );
 
     SimDataPacket packet;

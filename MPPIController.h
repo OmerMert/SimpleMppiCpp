@@ -39,7 +39,8 @@ extern "C" void launch_mppi_gpu(
     float term_w_x, float term_w_y, float term_w_yaw, float term_w_v,
     float param_gamma, float inv_sigma_steer, float inv_sigma_accel,
         float max_steer, float max_accel, float wheelbase,
-    float vehicle_w_param, float vehicle_l_param, float safety_margin
+    float vehicle_w_param, float vehicle_l_param, float safety_margin,
+    float influence_radius_param, float cbf_weight_param, float decay_rate_param
 );
 
 class MPPIController {
@@ -58,7 +59,10 @@ public:
         const Matrix2d& sigma,
         const Vector4d& stage_cost_weight,
         const Vector4d& terminal_cost_weight,
-        const std::vector<Obstacle>& obstacles
+        const std::vector<Obstacle>& obstacles,
+        const float influence_radius,
+        const float cbf_weight,
+        const float decay_rate
     );
 
     std::tuple<Control, MatrixXd> calc_control_input(const State& observed_x);
@@ -88,6 +92,11 @@ private:
     double L;
     double max_steer;
     double max_accel;
+
+    // CBF parameters
+    float influence_radius;
+    float cbf_weight;
+    float decay_rate;
     
     // Reference path
     MatrixXd ref_path; // N x 4 [x, y, yaw, v]

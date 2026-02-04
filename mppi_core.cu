@@ -8,7 +8,6 @@ struct Obstacle {
     float x, y, r;
 };
 
-
 __device__ float normalize_angle_diff(float diff) {
     while (diff > M_PI) diff -= 2.0f * M_PI;
     while (diff < -M_PI) diff += 2.0f * M_PI;
@@ -30,6 +29,59 @@ __device__ void update_state_gpu(
     *yaw = current_yaw + current_v / wheelbase * tanf(steer) * dt;
     *v = current_v + accel * dt;
 
+}
+
+// CBF Function
+__device__ float compute_cbf_cost(
+    float x, float y, float yaw, 
+    const Obstacle* obstacles, int num_obs,
+    float vw, float vl,
+    float influence_radius, float cbf_weight, float decay_rate) 
+    {
+    float total_barrier_cost = 0.0f;
+    
+    float robot_radius = sqrtf(vw*vw + vl*vl) / 2.0f; 
+
+    // Hard Collision Check
+    float local_x[9] = {-0.5f*vl, -0.5f*vl, -0.5f*vl,  0.0f,      0.0f,     0.0f,     0.5f*vl, 0.5f*vl, 0.5f*vl};
+    float local_y[9] = {-0.5f*vw,  0.0f,     0.5f*vw,  0.5f*vw,  -0.5f*vw,  0.0f,     0.5f*vw, 0.0f,   -0.5f*vw};
+    float c = cosf(yaw);
+    float s = sinf(yaw);
+
+    for(int i = 0; i < num_obs; ++i) {
+        float obs_x = obstacles[i].x;
+        float obs_y = obstacles[i].y;
+        float obs_r = obstacles[i].r;
+        
+        bool collision = false;
+        float r_sq = obs_r * obs_r;
+        for(int p = 0; p < 9; ++p) {
+            float global_px = (local_x[p] * c - local_y[p] * s) + x;
+            float global_py = (local_x[p] * s + local_y[p] * c) + y;
+            float dist_sq = (global_px - obs_x)*(global_px - obs_x) + (global_py - obs_y)*(global_py - obs_y);
+            if(dist_sq < r_sq) {
+                collision = true;
+                break;
+            }
+        }
+        
+        if (collision) {
+            return 1000000000.0f;
+        }
+
+        float dx = x - obs_x;
+        float dy = y - obs_y;
+        float dist = sqrtf(dx*dx + dy*dy);
+        
+        float h_x = dist - (obs_r + robot_radius);
+        
+        if (h_x < influence_radius) {
+            float cost = cbf_weight * expf(-decay_rate * h_x);
+            total_barrier_cost += cost;
+        }
+    }
+    
+    return total_barrier_cost;
 }
 
 __device__ bool check_collision_gpu(
@@ -111,7 +163,8 @@ __global__ void mppi_rollout_kernel(
     float inv_sigma_steer, // 1.0 / Sigma[0,0]
     float inv_sigma_accel,  // 1.0 / Sigma[1,1]
     float max_steer, float max_accel, float wheelbase,
-    float vehicle_w, float vehicle_l
+    float vehicle_w, float vehicle_l,
+    float influence_radius, float cbf_weight, float decay_rate
 ) {
     
     int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -151,13 +204,13 @@ __global__ void mppi_rollout_kernel(
             accel = u_prev[u_idx + 1] + n_accel;
         }
 
-        // Clamp (Sınırla)
+        // Clamp
         if(steer > max_steer) steer = max_steer;
         if(steer < -max_steer) steer = -max_steer;
         if(accel > max_accel) accel = max_accel;
         if(accel < -max_accel) accel = -max_accel;
 
-        // Durumu Güncelle (_F)
+        // (_F)
         update_state_gpu(&x, &y, &yaw, &v, steer, accel, dt, wheelbase);
 
         // Stage Cost (_c)
@@ -171,10 +224,10 @@ __global__ void mppi_rollout_kernel(
                         w_yaw*(yaw_diff)*(yaw_diff) +
                         w_v*(v-rv)*(v-rv);
 
-        // Çarpışma Cezası
-        if(check_collision_gpu(x, y, yaw, obstacles, num_obs, vehicle_w, vehicle_l)) {
-            stage_cost += 1000000000.0f; 
-        }
+        // control barrier function
+        stage_cost += compute_cbf_cost(x, y, yaw, obstacles, num_obs, vehicle_w, vehicle_l, 
+                                       influence_radius, cbf_weight, decay_rate);
+
 
         float control_cost = 0.0f;
         if (!is_exploration) {
@@ -225,7 +278,8 @@ extern "C" void launch_mppi_gpu(
     float term_w_x, float term_w_y, float term_w_yaw, float term_w_v,
     float param_gamma, float inv_sigma_steer, float inv_sigma_accel,
     float max_steer, float max_accel, float wheelbase,
-    float vehicle_w_param, float vehicle_l_param, float safety_margin
+    float vehicle_w_param, float vehicle_l_param, float safety_margin,
+    float influence_radius_param, float cbf_weight_param, float decay_rate_param
 ) {
     float *d_state, *d_u, *d_noise, *d_path, *d_costs;
     Obstacle *d_obs;
@@ -249,6 +303,7 @@ extern "C" void launch_mppi_gpu(
     float final_w = vehicle_w_param * safety_margin;
     float final_l = vehicle_l_param * safety_margin;
 
+
     mppi_rollout_kernel<<<blocksPerGrid, threadsPerBlock>>>(
         d_state, d_u, d_noise, d_path, path_size, d_obs, num_obs, d_costs,
         K, T, dt, prev_idx, param_exploration,
@@ -256,7 +311,8 @@ extern "C" void launch_mppi_gpu(
         term_w_x, term_w_y, term_w_yaw, term_w_v,
         param_gamma, inv_sigma_steer, inv_sigma_accel,
         max_steer, max_accel, wheelbase,
-        final_w, final_l
+        final_w, final_l, 
+        influence_radius_param, cbf_weight_param, decay_rate_param
     );
     
 

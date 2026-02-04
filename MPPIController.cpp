@@ -12,11 +12,13 @@ MPPIController::MPPIController(
     double param_exploration, double param_lambda, double param_alpha,
     const Matrix2d& sigma, const Vector4d& stage_cost_weight,
     const Vector4d& terminal_cost_weight,
-    const std::vector<Obstacle>& obstacles_param)
+    const std::vector<Obstacle>& obstacles_param,
+    const float influence_radius, const float cbf_weight, const float decay_rate)
     : dt(delta_t), L(wheel_base), max_steer(max_steer_abs), max_accel(max_accel_abs),
       ref_path(ref_path), T(horizon_step_T), K(number_of_samples_K),
       param_exploration(param_exploration), param_lambda(param_lambda), param_alpha(param_alpha),
-      Sigma(sigma), stage_cost_weight(stage_cost_weight), terminal_cost_weight(terminal_cost_weight), obstacles(obstacles_param)
+      Sigma(sigma), stage_cost_weight(stage_cost_weight), terminal_cost_weight(terminal_cost_weight), obstacles(obstacles_param),
+      influence_radius(influence_radius), cbf_weight(cbf_weight), decay_rate(decay_rate)
 {
     param_gamma = param_lambda * (1.0 - param_alpha);
     u_prev = MatrixXd::Zero(T, dim_u);
@@ -66,7 +68,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     // Initial state for GPU
     float h_initial_state[4] = {(float)x0[0], (float)x0[1], (float)x0[2], (float)x0[3]};
 
-    // Ref Path'i hazırla (Bunu aslında Constructor'da bir kere yapıp saklamak lazım)
+    // Flatten reference path for GPU
     int path_rows = ref_path.rows();
     std::vector<float> h_ref_path(path_rows * 4);
     for(int i=0; i<path_rows; ++i) {
@@ -76,7 +78,6 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         h_ref_path[i*4+3] = (float)ref_path(i, 3);
     }
 
-    // Çıktı için yer ayır
     std::vector<float> h_costs(K);
     float inv_sigma_steer = 1.0f / (float)Sigma(0,0);
     float inv_sigma_accel = 1.0f / (float)Sigma(1,1);
@@ -100,10 +101,11 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
 
         param_gamma, inv_sigma_steer, inv_sigma_accel,
         (float)max_steer, (float)max_accel, (float)L,
-        (float)vehicle_width, (float)vehicle_length, (float)safety_margin_rate
+        (float)vehicle_width, (float)vehicle_length, (float)safety_margin_rate,
+        influence_radius, cbf_weight, decay_rate
     );
 
-    // 4. Sonuçları Kullan (S matrisini h_costs ile doldur)
+    // Fill the cost vector from GPU output
     Eigen::VectorXd S(K);
     for(int k=0; k<K; ++k) {
         S[k] = h_costs[k];
@@ -134,7 +136,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         optimal_traj.row(t) = x_opt;
     }
 
-    // Control input'u fiziksel limitlere göre clamp'leyin
+    // clamp the first control input to ensure safety
     u(0, 0) = std::clamp(u(0, 0), -max_steer, max_steer);
     u(0, 1) = std::clamp(u(0, 1), -max_accel, max_accel);
 
@@ -142,7 +144,6 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     u_prev.block(0, 0, T - 1, dim_u) = u.block(1, 0, T - 1, dim_u);
     u_prev.row(T - 1) = u.row(T - 1);
 
-    // Return ederken clamp'lenmiş değeri gönderin
     return std::make_tuple(u.row(0), optimal_traj);
 }
 
