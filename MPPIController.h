@@ -66,7 +66,12 @@ public:
     );
 
     std::tuple<Control, MatrixXd> calc_control_input(const State& observed_x);
-
+    
+    // Returns: [ref_x, ref_y, ref_yaw, ref_v]
+    Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
+    double _is_collided(const State& x_t);
+    void set_weights(double w_x, double w_y, double w_yaw, double w_v);
+    void reset();
 private:
 
     int dim_x = 4; // dimension of system state vector
@@ -121,8 +126,6 @@ private:
     // Terminal cost
     double _phi(const State& x_T);
 
-    // Returns: [ref_x, ref_y, ref_yaw, ref_v]
-    Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
 
     MatrixXd _calc_epsilon();
 
@@ -132,7 +135,7 @@ private:
 
     double normalize_angle(double angle) const;
 
-    double _is_collided(const State& x_t);
+
 };
 
 #endif // MPPI_CONTROLLER_H

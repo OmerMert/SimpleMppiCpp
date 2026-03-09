@@ -41,8 +41,8 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
 
     // get the waypoint closest to current vehicle position 
     _get_nearest_waypoint(x0[0], x0[1], true);
-    if (prev_waypoints_idx >= ref_path.rows() - 1) {
-        std::cerr << "[ERROR] End of the reference path." << std::endl;
+    if (prev_waypoints_idx >= ref_path.rows() - 4) {
+        std::cerr << "[Finish] End of the reference path." << std::endl;
         throw std::out_of_range("End of the reference path.");
     }
 
@@ -330,4 +330,15 @@ double MPPIController::_is_collided(const State& x_t) {
     }
 
     return 0.0; // not collided
+}
+
+void MPPIController::set_weights(double w_x, double w_y, double w_yaw, double w_v) {
+        stage_cost_weight << w_x, w_y, w_yaw, w_v;
+        terminal_cost_weight << w_x, w_y, w_yaw, w_v;
+}
+
+// --- Reset MPPI Internal State ---
+void MPPIController::reset() {
+    prev_waypoints_idx = 0; 
+    u_prev.setZero();       
 }

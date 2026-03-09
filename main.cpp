@@ -33,6 +33,16 @@ Vector4d stage_cost_weight;
 Vector4d terminal_cost_weight;
 std::vector<Obstacle> defined_obstacles;
 
+// Parse the weights from the received UDP message
+void parse_weights(const std::string& msg, double& wx, double& wy, double& wyaw, double& wv) {
+    std::stringstream ss(msg);
+    std::string item;
+    std::getline(ss, item, ','); wx = std::stod(item);
+    std::getline(ss, item, ','); wy = std::stod(item);
+    std::getline(ss, item, ','); wyaw = std::stod(item);
+    std::getline(ss, item, ','); wv = std::stod(item);
+}
+
 void ReadConfig() {
 
     std::ifstream f("config.json");
@@ -123,11 +133,23 @@ int main() {
     if (!setupUDPSender(udpSocket, destAddr)) {
         return 1;
     }
-    std::cout << "[INFO] UDP sender 127.0.0.1:5005 is set." << std::endl;
+    std::cout << "[INFO] UDP sender 127.0.0.1:5007 is set." << std::endl;
 
-    // --- Simulation settings ---
-    int sim_steps = 800;  // [steps]
-    std::cout << "[INFO] delta_t : " << delta_t << "[s] , sim_steps : " << sim_steps << "[steps], total_sim_time : " << delta_t * sim_steps << "[s]" << std::endl;
+// --- UDP ---
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    
+    SOCKET serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in serverAddr, clientAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(5006);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    bind(serverSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
+
+    sockaddr_in pyAddr;
+    pyAddr.sin_family = AF_INET;
+    pyAddr.sin_port = htons(5007);
+    pyAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     // --- load the reference path ---
     MatrixXd ref_path;
@@ -173,57 +195,89 @@ int main() {
         decay_rate
     );
 
-    SimDataPacket packet;
+    int sim_steps = 350;
+    char recvBuffer[512];
+    int clientAddrLen = sizeof(clientAddr);
+    int train_step = 0;
+    while(true)
+    {
+        int bytesReceived = recvfrom(serverSocket, recvBuffer, 512, 0, (SOCKADDR*)&clientAddr, &clientAddrLen);
+        if (bytesReceived > 0) {
+            recvBuffer[bytesReceived] = '\0';
+            std::string msg(recvBuffer);
+            
+            double w_x, w_y, w_yaw, w_v;
+            parse_weights(msg, w_x, w_y, w_yaw, w_v);
 
-    //simulation loop
-    for (int i = 0; i < sim_steps; ++i) {
+            mppi.set_weights(w_x, w_y, w_yaw, w_v);
+            mppi.reset(); 
+            vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); 
 
-        using clock = std::chrono::steady_clock; 
-        auto t0 = clock::now();
+            double total_reward = 0.0;
+            bool crashed = false;
 
-        // get current state of vehicle
-        State current_state = vehicle.get_state();
+            SimDataPacket packet;
 
-        Control optimal_input;
-        MatrixXd optimal_traj;
+            //simulation loop (1 Episode)
+            for (int i = 0; i < sim_steps; ++i) {
 
-        try {
-            // calculate input force with MPPI
-            std::tie(optimal_input, optimal_traj) = mppi.calc_control_input(current_state);
-        } catch (const std::out_of_range& e) {
-            // the vehicle has reached the end of the reference path
-            std::cout << "[ERROR] IndexError detected. Terminate simulation." << std::endl;
-            break;
+                // get current state of vehicle
+                State current_state = vehicle.get_state();
+
+                Control optimal_input;
+                MatrixXd optimal_traj;
+
+                try {
+                    // calculate input force with MPPI
+                    std::tie(optimal_input, optimal_traj) = mppi.calc_control_input(current_state);
+                    total_reward -= 2.0;
+                } catch (const std::out_of_range& e) {
+                    total_reward += 5000.0; // Finish bonus
+                    break;
+                }
+
+                // update states of vehicle
+                vehicle.update(optimal_input, delta_t);
+
+                State new_state = vehicle.get_state();
+
+                // REWARD FUNCTION
+                Vector4d ref = mppi._get_nearest_waypoint(new_state[0], new_state[1]);
+                double dist_to_path = std::sqrt(std::pow(new_state[0] - ref[0], 2) + std::pow(new_state[1] - ref[1], 2));
+                
+                total_reward -= dist_to_path;
+                total_reward += new_state[3]; 
+
+                // Collision check
+                if (mppi._is_collided(new_state) > 0.0) {
+                    total_reward -= 10000.0;
+                    crashed = true;
+                    break; 
+                }
+
+                // --- send UDP data ---
+                packet.time = train_step + 1;
+                packet.x = current_state[0];
+                packet.y = current_state[1];
+                packet.yaw = current_state[2];
+                packet.v = current_state[3];
+                packet.steer = optimal_input[0];
+                packet.accel = optimal_input[1];
+
+                sendUDPData(udpSocket, destAddr, packet);
+            }
+
+            // Send total reward
+            std::string reward_msg = std::to_string(total_reward);
+            sendto(serverSocket, reward_msg.c_str(), reward_msg.length(), 0, (SOCKADDR*)&pyAddr, sizeof(pyAddr));
+            
+            train_step++;
+            std::cout << train_step << ":Computed weights: [" << w_x << ", " << w_y << ", " << w_yaw << ", " << w_v << "] -> Total Reward: " << total_reward << std::endl;
         }
-
-        // print current state and input force
-        double t = i * delta_t;
-        printf("Time: %5.2f[s], x=%+7.3f[m], y=%+7.3f[m], yaw=%+7.3f[rad], v=%+7.3f[m/s], steer=%+6.2f[rad], accel=%+6.2f[m/s]\n",
-               t, current_state[0], current_state[1], current_state[2], current_state[3], optimal_input[0], optimal_input[1]);
-
-        // update states of vehicle
-        vehicle.update(optimal_input, delta_t);
-
-        auto t1 = clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-        std::cout << "Time: " << elapsed << " ms\n";
-
-        // --- send UDP data ---
-        packet.time = t;
-        packet.x = current_state[0];
-        packet.y = current_state[1];
-        packet.yaw = current_state[2];
-        packet.v = current_state[3];
-        packet.steer = optimal_input[0];
-        packet.accel = optimal_input[1];
-        
-        
-        sendUDPData(udpSocket, destAddr, packet);
 
     }
 
-    cleanupUDPSender(udpSocket);
-    std::cout << "[INFO] Simulation is done." << std::endl;
-    int a = std::cin.get();
+    closesocket(serverSocket);
+    WSACleanup();
     return 0;
 }
