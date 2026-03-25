@@ -26,19 +26,5 @@ echo.
 
 cd ..
 
-start "simulator" python mppi_visualizer.py
-
-REM Wait for a moment to ensure the executable is ready
-timeout /t 5 >nul 
-
-if exist MppiCpp.exe (
-
-    
-    start "controller" MppiCpp.exe
-) else (
-    echo Error: Executable object is not exist!
-    pause
-    exit /b
-)
 
 

@@ -18,7 +18,7 @@ struct SimDataPacket {
     double steer;
     double accel;
 };
-bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr);
+bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr, int listenPort, int sendPort);
 void sendUDPData(SOCKET sock, const sockaddr_in& destAddr, const SimDataPacket& packet);
 void cleanupUDPSender(SOCKET sock);
 

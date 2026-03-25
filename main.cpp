@@ -33,6 +33,8 @@ Vector4d stage_cost_weight;
 Vector4d terminal_cost_weight;
 std::vector<Obstacle> defined_obstacles;
 
+void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, SOCKET serverSocket, SOCKADDR_IN destAddr, double& total_reward);
+
 // Parse the weights from the received UDP message
 void parse_weights(const std::string& msg, double& wx, double& wy, double& wyaw, double& wv) {
     std::stringstream ss(msg);
@@ -124,32 +126,36 @@ MatrixXd loadRefPath(const std::string& filepath) {
     return matrix;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     std::cout << "[INFO] Starting C++ MPPI Path Tracking Simulation" << std::endl;
+    std::string mode = "normal"; // default mode
 
-    // --- UDP Sender Setup ---
-    SOCKET udpSocket;
-    sockaddr_in destAddr;
-    if (!setupUDPSender(udpSocket, destAddr)) {
+    //--- UDP Setup ---
+    SOCKET serverSocket;
+    sockaddr_in destAddr, clientAddr;
+
+    int cpp_listen_port = 5005;
+    int py_send_port = 5006;
+
+    if (argc >= 4) {
+        cpp_listen_port = std::stoi(argv[1]);
+        py_send_port = std::stoi(argv[2]);
+        mode = std::string(argv[3]);
+
+    }
+
+    if (!setupUDPSender(serverSocket, destAddr, cpp_listen_port, py_send_port)) {
         return 1;
     }
-    std::cout << "[INFO] UDP sender 127.0.0.1:5007 is set." << std::endl;
-
-// --- UDP ---
-    WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    std::cout << "[INFO] UDP sender 127.0.0.1:" << cpp_listen_port << " -> 127.0.0.1:" << py_send_port << " is set." << std::endl;
     
-    SOCKET serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in serverAddr, clientAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(5006);
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    bind(serverSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
 
-    sockaddr_in pyAddr;
-    pyAddr.sin_family = AF_INET;
-    pyAddr.sin_port = htons(5007);
-    pyAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if(mode == "train") {
+        std::cout << "[INFO] C++ is running in TRAINING MODE." << std::endl;
+    } else {
+        std::cout << "[INFO] C++ is running in NORMAL MODE." << std::endl;
+    }
+
 
     // --- load the reference path ---
     MatrixXd ref_path;
@@ -195,89 +201,116 @@ int main() {
         decay_rate
     );
 
-    int sim_steps = 350;
-    char recvBuffer[512];
-    int clientAddrLen = sizeof(clientAddr);
-    int train_step = 0;
-    while(true)
+    double total_reward = 0.0;
+
+    if(mode == "normal")
     {
-        int bytesReceived = recvfrom(serverSocket, recvBuffer, 512, 0, (SOCKADDR*)&clientAddr, &clientAddrLen);
-        if (bytesReceived > 0) {
-            recvBuffer[bytesReceived] = '\0';
-            std::string msg(recvBuffer);
-            
-            double w_x, w_y, w_yaw, w_v;
-            parse_weights(msg, w_x, w_y, w_yaw, w_v);
+        Simulate(mppi, vehicle, mode, serverSocket, destAddr, total_reward);
 
-            mppi.set_weights(w_x, w_y, w_yaw, w_v);
-            mppi.reset(); 
-            vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); 
+    }else
+    {
 
-            double total_reward = 0.0;
-            bool crashed = false;
+        char recvBuffer[512];
+        int clientAddrLen = sizeof(clientAddr);
+        int train_step = 0;
 
-            SimDataPacket packet;
-
-            //simulation loop (1 Episode)
-            for (int i = 0; i < sim_steps; ++i) {
-
-                // get current state of vehicle
-                State current_state = vehicle.get_state();
-
-                Control optimal_input;
-                MatrixXd optimal_traj;
-
-                try {
-                    // calculate input force with MPPI
-                    std::tie(optimal_input, optimal_traj) = mppi.calc_control_input(current_state);
-                    total_reward -= 2.0;
-                } catch (const std::out_of_range& e) {
-                    total_reward += 5000.0; // Finish bonus
-                    break;
-                }
-
-                // update states of vehicle
-                vehicle.update(optimal_input, delta_t);
-
-                State new_state = vehicle.get_state();
-
-                // REWARD FUNCTION
-                Vector4d ref = mppi._get_nearest_waypoint(new_state[0], new_state[1]);
-                double dist_to_path = std::sqrt(std::pow(new_state[0] - ref[0], 2) + std::pow(new_state[1] - ref[1], 2));
+        while(true)
+        {
+            int bytesReceived = recvfrom(serverSocket, recvBuffer, 512, 0, (SOCKADDR*)&clientAddr, &clientAddrLen);
+            if (bytesReceived > 0) {
+                recvBuffer[bytesReceived] = '\0';
+                std::string msg(recvBuffer);
                 
-                total_reward -= dist_to_path;
-                total_reward += new_state[3]; 
+                double w_x, w_y, w_yaw, w_v;
+                parse_weights(msg, w_x, w_y, w_yaw, w_v);
 
-                // Collision check
-                if (mppi._is_collided(new_state) > 0.0) {
-                    total_reward -= 10000.0;
-                    crashed = true;
-                    break; 
-                }
+                mppi.set_weights(w_x, w_y, w_yaw, w_v);
+                mppi.reset(); 
+                vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); 
+                total_reward = 0.0;
 
-                // --- send UDP data ---
-                packet.time = train_step + 1;
-                packet.x = current_state[0];
-                packet.y = current_state[1];
-                packet.yaw = current_state[2];
-                packet.v = current_state[3];
-                packet.steer = optimal_input[0];
-                packet.accel = optimal_input[1];
+                Simulate(mppi, vehicle, mode, serverSocket, destAddr, total_reward);
+                
+                // Send total reward
+                std::string reward_msg = std::to_string(total_reward);
+                sendto(serverSocket, reward_msg.c_str(), reward_msg.length(), 0, (SOCKADDR*)&destAddr, sizeof(destAddr));
+                train_step++;
+                std::cout << train_step << ":Computed weights: [" << w_x << ", " << w_y << ", " << w_yaw << ", " << w_v << "] " << "Total Reward: " << total_reward << std::endl;
 
-                sendUDPData(udpSocket, destAddr, packet);
             }
 
-            // Send total reward
-            std::string reward_msg = std::to_string(total_reward);
-            sendto(serverSocket, reward_msg.c_str(), reward_msg.length(), 0, (SOCKADDR*)&pyAddr, sizeof(pyAddr));
-            
-            train_step++;
-            std::cout << train_step << ":Computed weights: [" << w_x << ", " << w_y << ", " << w_yaw << ", " << w_v << "] -> Total Reward: " << total_reward << std::endl;
         }
-
     }
+
 
     closesocket(serverSocket);
     WSACleanup();
     return 0;
 }
+
+
+void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, SOCKET serverSocket, SOCKADDR_IN destAddr, double& total_reward) {
+
+    int sim_steps = 800;
+    
+    bool crashed = false;
+    SimDataPacket packet;
+
+    //simulation loop (1 Episode)
+    for (int i = 0; i < sim_steps; ++i) {
+
+
+        // get current state of vehicle
+        State current_state = vehicle.get_state();
+
+        Control optimal_input;
+        MatrixXd optimal_traj;
+
+        try {
+            // calculate input force with MPPI
+            std::tie(optimal_input, optimal_traj) = mppi.calc_control_input(current_state);
+            total_reward -= 1.0; // Step penalty
+        } catch (const std::out_of_range& e) {
+            total_reward += 5000.0; // Finish bonus
+            break;
+        }
+
+        // update states of vehicle
+        vehicle.update(optimal_input, delta_t);
+
+        State new_state = vehicle.get_state();
+
+        // REWARD FUNCTION
+        Vector4d ref = mppi._get_nearest_waypoint(new_state[0], new_state[1]);
+        double dist_to_path = std::sqrt(std::pow(new_state[0] - ref[0], 2) + std::pow(new_state[1] - ref[1], 2));
+        
+        total_reward -= dist_to_path / 5.0;
+        total_reward += new_state[3]; 
+
+        // Collision check
+        if (mppi._is_collided(new_state) > 0.0) {
+            total_reward -= 10000.0;
+            crashed = true;
+            break; 
+        }
+
+        double t = i * delta_t;
+        if(mode == "normal") {
+            // --- send UDP data ---
+            packet.time = t;
+            packet.x = current_state[0];
+            packet.y = current_state[1];
+            packet.yaw = current_state[2];
+            packet.v = current_state[3];
+            packet.steer = optimal_input[0];
+            packet.accel = optimal_input[1];
+
+            sendUDPData(serverSocket, destAddr, packet);
+        }
+
+
+    }
+
+
+}
+

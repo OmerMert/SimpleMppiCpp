@@ -9,8 +9,8 @@
     "param_lambda": 100.0,
     "param_alpha": 0.98,
     "sigma": [[0.075, 0.0], [0.0, 2.0]],
-    "stage_cost_weight": [20.0, 20.0, 40.0, 5.0],
-    "terminal_cost_weight": [20.0, 20.0, 40.0, 5.0],
+    "stage_cost_weight": [8.73, 50.0, 48.89, 46.0],
+    "terminal_cost_weight": [8.73, 50.0, 48.89, 46.0],
 
     "VEHICLE_CONFIG": {
     "W": 3.0,

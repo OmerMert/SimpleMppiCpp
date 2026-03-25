@@ -1,3 +1,5 @@
+import subprocess
+import os
 import socket
 import struct
 import pandas as pd
@@ -174,6 +176,13 @@ def start_udp_listener():
     sock.bind((UDP_IP, UDP_PORT))
     
     print(f"[INFO] Python UDP listenner {UDP_IP}:{UDP_PORT} is started.")
+
+    exe_path = "MppiCpp.exe" 
+    if os.path.exists(exe_path):
+       # Pass ports to the C++ program as command line arguments
+       subprocess.Popen([exe_path, "5006", "5005", "normal"])
+    else:
+        print(f"[ERROR] {exe_path} not found!")
 
     try:
         while True:

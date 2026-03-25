@@ -1,6 +1,6 @@
 #include "UDP.h"
 
-bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr) {
+bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr, int listenPort ,int sendPort) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         std::cerr << "[ERROR] WSAStartup failed." << std::endl;
@@ -14,10 +14,16 @@ bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr) {
         return false;
     }
 
-    // Setup destination address
+    sockaddr_in serverAddr;
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(listenPort);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    bind(outSocket, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
+
     outDestAddr.sin_family = AF_INET;
-    outDestAddr.sin_port = htons(5005);
+    outDestAddr.sin_port = htons(sendPort);
     inet_pton(AF_INET, "127.0.0.1", &outDestAddr.sin_addr);
+
 
     return true;
 }
