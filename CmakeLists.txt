@@ -19,6 +19,7 @@ add_executable(MppiCpp
     main.cpp
     Vehicle.cpp
     MppiController.cpp
+    CostMapGenerator.cpp
     UDP.cpp
     mppi_core.cu
 )
@@ -29,4 +30,3 @@ set_target_properties(MppiCpp PROPERTIES
 if(WIN32)
   target_link_libraries(MppiCpp PUBLIC ws2_32)
 endif()
-

@@ -205,13 +205,18 @@ double MPPIController::_phi(const State& x_T) {
     return cost;
 }
 
-// Finds the nearest waypoint on the reference path
+// Finds the nearest waypoint on the reference path.
+// IMPORTANT: In dynamic systems like BeamNG the vehicle can slide backwards.
+// Instead of searching only forward, this now also looks backward (bidirectional window).
 Vector4d MPPIController::_get_nearest_waypoint(double x, double y, bool update_prev_idx) {
-    
-    const int SEARCH_IDX_LEN = 200; //[points] forward search range
-    int end_idx = std::min(static_cast<int>(ref_path.rows()), prev_waypoints_idx + SEARCH_IDX_LEN);
 
-    MatrixXd search_segment = ref_path.block(prev_waypoints_idx, 0, end_idx - prev_waypoints_idx, 2); 
+    const int SEARCH_FWD = 200;    // waypoints to search forward
+    const int SEARCH_BWD = 50;     // waypoints to search backward
+    
+    int start_idx = std::max(0, prev_waypoints_idx - SEARCH_BWD);
+    int end_idx = std::min(static_cast<int>(ref_path.rows()), prev_waypoints_idx + SEARCH_FWD);
+
+    MatrixXd search_segment = ref_path.block(start_idx, 0, end_idx - start_idx, 2); 
 
     // Calculate distances to waypoints in the search segment
     Vector2d current_pos(x, y);
@@ -223,7 +228,7 @@ Vector4d MPPIController::_get_nearest_waypoint(double x, double y, bool update_p
     VectorXd::Index min_idx;
     dist_sq.minCoeff(&min_idx);
     
-    int nearest_idx = min_idx + prev_waypoints_idx;
+    int nearest_idx = min_idx + start_idx;
     // update nearest waypoint index if necessary
     if (update_prev_idx) {
         prev_waypoints_idx = nearest_idx;

@@ -1,33 +1,64 @@
 {
-    "delta_t": 0.05,
-    "wheel_base": 2.5,
-    "max_steer_abs": 0.523,
-    "max_accel_abs": 5.0,
-    "horizon_step_T": 20,
-    "number_of_samples_K": 1000,
-    "param_exploration": 0.0,
-    "param_lambda": 100.0,
-    "param_alpha": 0.98,
-    "sigma": [[0.075, 0.0], [0.0, 2.0]],
-    "stage_cost_weight": [8.73, 50.0, 48.89, 46.0],
-    "terminal_cost_weight": [8.73, 50.0, 48.89, 46.0],
-
-    "VEHICLE_CONFIG": {
-    "W": 3.0,
-    "L": 4.0,
+  "delta_t": 0.05,
+  "wheel_base": 1.5,
+  "max_steer_abs": 0.3,
+  "max_accel_abs": 2.5,
+  "horizon_step_T": 20,
+  "number_of_samples_K": 1000,
+  "param_exploration": 0,
+  "param_lambda": 100,
+  "param_alpha": 0.98,
+ "sigma": [
+    [
+      0.075,
+      0
+    ],
+    [
+      0,
+      2
+    ]
+  ],
+  "stage_cost_weight": [
+    8.73,
+    50,
+    48.89,
+    46
+  ],
+  "terminal_cost_weight": [
+    8.73,
+    50,
+    48.89,
+    46
+  ],
+  "VEHICLE_CONFIG": {
+    "W": 3,
+    "L": 4,
     "WHEEL_W": 0.4,
     "WHEEL_L": 0.7
-    },
-
-    "OBSTACLES": [
-        [8.0, 5.0, 4.0],
-        [18.0, -5.0, 4.0]
-    ],
-
-    "CBF_PARAMETERS": {
+  },
+  "OBSTACLES": [],
+  "CBF_PARAMETERS": {
     "influence_radius": 0.5,
-    "cbf_weight": 10.0,
-    "decay_rate": 2.0
-    }
+    "cbf_weight": 10,
+    "decay_rate": 2
+  },
+  "_calibration_info": {
+    "source": "beamng_sysid.py + linear-region refit",
+    "vehicle": "etk800",
+    "wheel_base_note": "L_eff from linear region fit",
+    "max_steer_note": "max_delta_eff * 0.75 safety factor to stay in linear regime",
+    "max_delta_raw_fit": 0.86,
+    "safety_factor": 0.75,
+    "linear_region_rms_err": 0.079,
+    "linear_region_rel_err_pct": 6.2
+  },
 
+    "REF_PATH_FILE": "data/ovalpath.csv",
+    
+    "COSTMAP_FILE": "data/costmap.csv",
+    "COSTMAP_RESOLUTION": 1.0,
+    "COSTMAP_MARGIN": 10.0,
+    "COSTMAP_GRADIENT_MARGIN": 3.0
+
+    
 }

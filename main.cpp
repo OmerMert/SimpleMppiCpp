@@ -7,6 +7,7 @@
 
 #include "Vehicle.h"
 #include "MPPIController.h"
+#include "CostMapGenerator.h"
 #include "UDP.h"
 #include <chrono>
 
@@ -28,12 +29,21 @@ float influence_radius;
 float cbf_weight;
 float decay_rate;
 
+std::string ref_path_filepath;
+// Cost Map Parameters
+double costmap_resolution;
+double costmap_margin;
+double costmap_gradient_margin;
+std::string costmap_filepath;
+
 Matrix2d sigma;
 Vector4d stage_cost_weight;
 Vector4d terminal_cost_weight;
-std::vector<Obstacle> defined_obstacles;
 
 void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, SOCKET serverSocket, SOCKADDR_IN destAddr, double& total_reward);
+
+// BeamNG mode: Vehicle class is not used; state comes from UDP
+void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr);
 
 // Parse the weights from the received UDP message
 void parse_weights(const std::string& msg, double& wx, double& wy, double& wyaw, double& wv) {
@@ -75,17 +85,17 @@ void ReadConfig() {
                             cfg["terminal_cost_weight"][2],
                             cfg["terminal_cost_weight"][3];
 
-    for (auto& ob : cfg["OBSTACLES"]) {
-        Obstacle o;
-        o.x = ob[0];
-        o.y = ob[1];
-        o.r = ob[2];
-        defined_obstacles.push_back(o);
-    }
-
     influence_radius = cfg["CBF_PARAMETERS"]["influence_radius"];
     cbf_weight       = cfg["CBF_PARAMETERS"]["cbf_weight"];
     decay_rate       = cfg["CBF_PARAMETERS"]["decay_rate"];
+
+    ref_path_filepath = cfg["REF_PATH_FILE"];
+
+        // Cost Map config
+    costmap_resolution       = cfg["COSTMAP_RESOLUTION"];
+    costmap_margin           = cfg["COSTMAP_MARGIN"];
+    costmap_gradient_margin  = cfg["COSTMAP_GRADIENT_MARGIN"];
+    costmap_filepath         = cfg["COSTMAP_FILE"];
 }
 
 
@@ -123,7 +133,30 @@ MatrixXd loadRefPath(const std::string& filepath) {
             matrix(i, j) = data[i][j];
         }
     }
+
+    // IMPORTANT: If the path yaw column (index 2) is in [0, 2pi], convert it to
+    // [-pi, pi] to be consistent with the MPPI state yaw (atan2 output).
+    // The GPU-side normalize_angle_diff expects this range.
+    if (matrix.cols() >= 3) {
+        const double PI_D = 3.14159265358979323846;
+        for (int i = 0; i < matrix.rows(); ++i) {
+            double y = matrix(i, 2);
+            // [0, 2pi] -> [-pi, pi]
+            while (y > PI_D)  y -= 2.0 * PI_D;
+            while (y < -PI_D) y += 2.0 * PI_D;
+            matrix(i, 2) = y;
+        }
+    }
+
     return matrix;
+}
+
+void computeMapBounds(const MatrixXd& ref_path, double margin,
+                      double& x_min, double& x_max, double& y_min, double& y_max) {
+    x_min = ref_path.col(0).minCoeff() - margin;
+    x_max = ref_path.col(0).maxCoeff() + margin;
+    y_min = ref_path.col(1).minCoeff() - margin;
+    y_max = ref_path.col(1).maxCoeff() + margin;
 }
 
 int main(int argc, char* argv[]) {
@@ -141,7 +174,6 @@ int main(int argc, char* argv[]) {
         cpp_listen_port = std::stoi(argv[1]);
         py_send_port = std::stoi(argv[2]);
         mode = std::string(argv[3]);
-
     }
 
     if (!setupUDPSender(serverSocket, destAddr, cpp_listen_port, py_send_port)) {
@@ -152,23 +184,52 @@ int main(int argc, char* argv[]) {
 
     if(mode == "train") {
         std::cout << "[INFO] C++ is running in TRAINING MODE." << std::endl;
+    } else if (mode == "beamng") {
+        std::cout << "[INFO] C++ is running in BEAMNG MODE." << std::endl;
     } else {
         std::cout << "[INFO] C++ is running in NORMAL MODE." << std::endl;
     }
 
+    // --- read config file ---
+    ReadConfig();
 
     // --- load the reference path ---
     MatrixXd ref_path;
     try {
-        ref_path = loadRefPath("data/ovalpath.csv");
-        std::cout << "[INFO] Referans path is loaded. Size: " << ref_path.rows() << "x" << ref_path.cols() << std::endl;
+        ref_path = loadRefPath(ref_path_filepath);
+        std::cout << "[INFO] Reference path loaded from: " << ref_path_filepath
+                  << " Size: " << ref_path.rows() << "x" << ref_path.cols() << std::endl;
     } catch (const std::exception& e) {
         std::cerr << e.what() << std::endl;
         return 1;
     }
 
-    // --- read config file ---
-    ReadConfig();
+    // --- Compute map bounds from reference path ---
+    double map_x_min, map_x_max, map_y_min, map_y_max;
+    computeMapBounds(ref_path, costmap_margin, map_x_min, map_x_max, map_y_min, map_y_max);
+
+        // --- Load cost map from CSV file ---
+    CostMapGenerator* costmap_gen_ptr = nullptr;
+    try {
+        costmap_gen_ptr = new CostMapGenerator(
+            costmap_filepath,
+            costmap_resolution,
+            map_x_min, map_y_min,
+            costmap_gradient_margin
+        );
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] CostMap loading failed: " << e.what() << std::endl;
+        std::cerr << "[ERROR] Make sure '" << costmap_filepath << "' exists!" << std::endl;
+        cleanupUDPSender(serverSocket);
+        return 1;
+    }
+    CostMapGenerator& costmap_gen = *costmap_gen_ptr;
+ 
+    // Get extracted obstacles for MPPI (circles derived from grid)
+    const auto& obstacles = costmap_gen.getObstacles();
+ 
+    // Get cost map with gradients for RL
+    const auto& global_costmap = costmap_gen.getCostMap();
 
     // initialize a vehicle as a control target
     Vehicle vehicle(
@@ -180,9 +241,13 @@ int main(int argc, char* argv[]) {
     vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
 
 
+    // BeamNG mode runs at 20 Hz (0.05 s/tick) and must match delta_t.
+    // Normal simulation mode used delta_t * 2.0; corrected for BeamNG.
+    double mppi_dt = (mode == "beamng") ? delta_t : delta_t * 2.0;
+
     // initialize a mppi controller for the vehicle
     MPPIController mppi(
-        delta_t * 2.0, // delta_t [s]
+        mppi_dt, // delta_t [s]
         wheel_base,           // wheel_base [m]
         max_steer_abs,         // max_steer_abs [rad]
         max_accel_abs,         // max_accel_abs [m/s^2]
@@ -195,7 +260,7 @@ int main(int argc, char* argv[]) {
         sigma, // sigma
         stage_cost_weight, // stage_cost_weight [x, y, yaw, v]
         terminal_cost_weight,  // terminal_cost_weight [x, y, yaw, v]
-        defined_obstacles, // obstacles
+        obstacles, // obstacles
         influence_radius,
         cbf_weight,
         decay_rate
@@ -206,10 +271,13 @@ int main(int argc, char* argv[]) {
     if(mode == "normal")
     {
         Simulate(mppi, vehicle, mode, serverSocket, destAddr, total_reward);
-
-    }else
+    }
+    else if (mode == "beamng")
     {
-
+        SimulateBeamNG(mppi, serverSocket, destAddr);
+    }
+    else // train mode
+    {
         char recvBuffer[512];
         int clientAddrLen = sizeof(clientAddr);
         int train_step = 0;
@@ -230,19 +298,24 @@ int main(int argc, char* argv[]) {
                 total_reward = 0.0;
 
                 Simulate(mppi, vehicle, mode, serverSocket, destAddr, total_reward);
+
+                // Send cost map + reward to Python
+                sendTrainResponse(
+                    serverSocket, destAddr,
+                    global_costmap,
+                    costmap_gen.getRows(), costmap_gen.getCols(),
+                    (float)costmap_resolution,
+                    (float)map_x_min, (float)map_y_min,
+                    (float)total_reward
+                );
                 
-                // Send total reward
-                std::string reward_msg = std::to_string(total_reward);
-                sendto(serverSocket, reward_msg.c_str(), reward_msg.length(), 0, (SOCKADDR*)&destAddr, sizeof(destAddr));
                 train_step++;
                 std::cout << train_step << ":Computed weights: [" << w_x << ", " << w_y << ", " << w_yaw << ", " << w_v << "] " << "Total Reward: " << total_reward << std::endl;
-
             }
-
         }
     }
 
-
+    if (costmap_gen_ptr) delete costmap_gen_ptr;
     closesocket(serverSocket);
     WSACleanup();
     return 0;
@@ -314,3 +387,83 @@ void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, S
 
 }
 
+
+// ==========================================================================
+// BeamNG integration simulation loop
+// ==========================================================================
+// Flow:
+//   1) Wait for StatePacket from Python bridge (real vehicle state)
+//   2) Compute optimal control with MPPI
+//   3) Send ControlPacket back to bridge
+//   4) Repeat
+// Note: the internal Vehicle class is NOT used in this mode - real physics run in BeamNG
+// ==========================================================================
+void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr) {
+    std::cout << "[BeamNG] Waiting for first state from bridge..." << std::endl;
+
+    StatePacket state_pkt;
+    ControlPacket ctrl_pkt;
+
+    // Block until first state arrives (waits while BeamNG stabilizes)
+    if (!receiveStatePacket(serverSocket, state_pkt, 0)) {
+        std::cerr << "[BeamNG] Failed to receive first state." << std::endl;
+        return;
+    }
+    std::cout << "[BeamNG] Connected. Starting control loop..." << std::endl;
+
+    int step = 0;
+    int max_steps = 5000; // safety limit
+
+    while (step < max_steps) {
+        // 1) State -> MPPI state vektoru
+        State x0;
+        x0 << state_pkt.x, state_pkt.y, state_pkt.yaw, state_pkt.v;
+
+        if (!state_pkt.valid) {
+            std::cout << "[BeamNG] Bridge sent stop signal (valid=0). Exiting." << std::endl;
+            break;
+        }
+
+        // 2) MPPI'yi cozdur
+        Control u_opt;
+        MatrixXd traj;
+        try {
+            std::tie(u_opt, traj) = mppi.calc_control_input(x0);
+        } catch (const std::out_of_range&) {
+            std::cout << "[BeamNG] End of path - completed!" << std::endl;
+            // reset=1: send "done" signal to Python bridge
+            ctrl_pkt.time = state_pkt.time;
+            ctrl_pkt.steer = 0.0;
+            ctrl_pkt.accel = -max_accel_abs;
+            ctrl_pkt.reset = 1;
+            sendControlPacket(serverSocket, destAddr, ctrl_pkt);
+            break;
+        }
+
+        // 3) ControlPacket hazirla ve gonder
+        ctrl_pkt.time = state_pkt.time;
+        ctrl_pkt.steer = u_opt[0];
+        ctrl_pkt.accel = u_opt[1];
+        ctrl_pkt.reset = 0;
+        sendControlPacket(serverSocket, destAddr, ctrl_pkt);
+
+        // Periyodik log
+        if (step % 20 == 0) {
+            std::cout << "[" << step << "] pos=(" << state_pkt.x << "," << state_pkt.y
+                      << ") yaw=" << state_pkt.yaw
+                      << " v=" << state_pkt.v
+                      << " | u=(" << u_opt[0] << "," << u_opt[1] << ")"
+                      << std::endl;
+        }
+
+        // 4) Wait for next state (5-second timeout)
+        if (!receiveStatePacket(serverSocket, state_pkt, 5000)) {
+            std::cerr << "[BeamNG] State timeout - did the bridge stop?" << std::endl;
+            break;
+        }
+
+        step++;
+    }
+
+    std::cout << "[BeamNG] Loop finished. Total steps: " << step << std::endl;
+}

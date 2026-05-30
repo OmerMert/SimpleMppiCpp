@@ -121,10 +121,13 @@ __device__ void get_nearest_waypoint_gpu(
     float min_dist_sq = 1e10f;
     int nearest = prev_idx;
     
-    int SEARCH_IDX_LEN = 200; 
-    int end_idx = (prev_idx + SEARCH_IDX_LEN < path_size) ? prev_idx + SEARCH_IDX_LEN : path_size;
+    // Bidirectional search: 50 backward, 200 forward
+    int SEARCH_BWD = 50;
+    int SEARCH_FWD = 200;
+    int start_idx = (prev_idx - SEARCH_BWD > 0) ? prev_idx - SEARCH_BWD : 0;
+    int end_idx = (prev_idx + SEARCH_FWD < path_size) ? prev_idx + SEARCH_FWD : path_size;
 
-    for(int i = prev_idx; i < end_idx; ++i) {
+    for(int i = start_idx; i < end_idx; ++i) {
         float px = path_points[i * 4 + 0];
         float py = path_points[i * 4 + 1];
         
@@ -181,6 +184,8 @@ __global__ void mppi_rollout_kernel(
     bool is_exploration = (k >= exploitation_count);
 
 
+    int local_waypoint_idx = prev_waypoint_idx;
+
     for (int t = 0; t < T; ++t) {
 
         int idx = k * T * 2 + t * 2;
@@ -195,11 +200,11 @@ __global__ void mppi_rollout_kernel(
         float steer, accel;
 
         if (is_exploration) {
-            // Sadece gürültü (Keşif)
+            // Pure noise (Exploration)
             steer = n_steer;
             accel = n_accel;
         } else {
-            // Önceki plan + gürültü (Sömürü)
+            // Previous plan + noise (Exploitation)
             steer = u_prev[u_idx + 0] + n_steer;
             accel = u_prev[u_idx + 1] + n_accel;
         }
@@ -213,10 +218,25 @@ __global__ void mppi_rollout_kernel(
         // (_F)
         update_state_gpu(&x, &y, &yaw, &v, steer, accel, dt, wheelbase);
 
-        // Stage Cost (_c)
+        // Stage Cost (_c): search while tracking waypoint index along the horizon
         float rx, ry, ryaw, rv;
-        get_nearest_waypoint_gpu(x, y, ref_path, path_size, prev_waypoint_idx, &rx, &ry, &ryaw, &rv);
-        
+        {
+            float min_d = 1e10f;
+            int SFWD = 200, SBWD = 50;
+            int si = (local_waypoint_idx - SBWD > 0) ? local_waypoint_idx - SBWD : 0;
+            int ei = (local_waypoint_idx + SFWD < path_size) ? local_waypoint_idx + SFWD : path_size;
+            for (int i = si; i < ei; ++i) {
+                float dx = x - ref_path[i*4+0];
+                float dy = y - ref_path[i*4+1];
+                float d = dx*dx + dy*dy;
+                if (d < min_d) { min_d = d; local_waypoint_idx = i; }
+            }
+            rx   = ref_path[local_waypoint_idx*4+0];
+            ry   = ref_path[local_waypoint_idx*4+1];
+            ryaw = ref_path[local_waypoint_idx*4+2];
+            rv   = ref_path[local_waypoint_idx*4+3];
+        }
+
         float yaw_diff = normalize_angle_diff(yaw - ryaw);
 
         float stage_cost = w_x*(x-rx)*(x-rx) + 
@@ -240,9 +260,9 @@ __global__ void mppi_rollout_kernel(
         total_cost += stage_cost + control_cost;
     }
 
-    // Terminal Cost
+    // Terminal Cost: local_waypoint_idx reflects the position at the end of the horizon
     float rx, ry, ryaw, rv;
-    get_nearest_waypoint_gpu(x, y, ref_path, path_size, prev_waypoint_idx, &rx, &ry, &ryaw, &rv);
+    get_nearest_waypoint_gpu(x, y, ref_path, path_size, local_waypoint_idx, &rx, &ry, &ryaw, &rv);
 
     float term_yaw_diff = normalize_angle_diff(yaw - ryaw);
 
