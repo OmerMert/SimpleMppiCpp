@@ -206,7 +206,7 @@ double MPPIController::_phi(const State& x_T) {
 }
 
 // Finds the nearest waypoint on the reference path.
-// IMPORTANT: In dynamic systems like BeamNG the vehicle can slide backwards.
+// IMPORTANT: In dynamic simulators the vehicle can slide backwards.
 // Instead of searching only forward, this now also looks backward (bidirectional window).
 Vector4d MPPIController::_get_nearest_waypoint(double x, double y, bool update_prev_idx) {
 

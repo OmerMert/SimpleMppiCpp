@@ -25,7 +25,7 @@ struct SimDataPacket {
     double accel;
 };
 
-// C++ -> Python (control command sent to BeamNG)
+// C++ -> Python (control command sent to Isaac)
 // Python struct format: "dddi" (3 doubles + 1 int32) = 28 bytes
 struct ControlPacket {
     double time;
@@ -34,7 +34,7 @@ struct ControlPacket {
     int32_t reset;       // 0 = continue, 1 = reset scenario
 };
 
-// Python -> C++ (real vehicle state from BeamNG)
+// Python -> C++ (real vehicle state from Isaac)
 // Python struct format: "dddddi" (5 doubles + 1 int32) = 44 bytes
 struct StatePacket {
     double time;
@@ -57,7 +57,7 @@ bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr,
 void sendUDPData(SOCKET sock, const sockaddr_in& destAddr,
                  const SimDataPacket& packet);
 
-// BeamNG mode: bidirectional functions
+// Isaac mode: bidirectional functions
 void sendControlPacket(SOCKET sock, const sockaddr_in& destAddr,
                        const ControlPacket& pkt);
 

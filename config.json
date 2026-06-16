@@ -42,17 +42,6 @@
     "cbf_weight": 10,
     "decay_rate": 2
   },
-  "_calibration_info": {
-    "source": "beamng_sysid.py + linear-region refit",
-    "vehicle": "etk800",
-    "wheel_base_note": "L_eff from linear region fit",
-    "max_steer_note": "max_delta_eff * 0.75 safety factor to stay in linear regime",
-    "max_delta_raw_fit": 0.86,
-    "safety_factor": 0.75,
-    "linear_region_rms_err": 0.079,
-    "linear_region_rel_err_pct": 6.2
-  },
-
     "REF_PATH_FILE": "data/ovalpath.csv",
     
     "COSTMAP_FILE": "data/costmap.csv",

@@ -42,8 +42,8 @@ Vector4d terminal_cost_weight;
 
 void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, SOCKET serverSocket, SOCKADDR_IN destAddr, double& total_reward);
 
-// BeamNG mode: Vehicle class is not used; state comes from UDP
-void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr);
+// Isaac mode: Vehicle class is not used; state comes from UDP
+void SimulateIsaac(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr);
 
 // Parse the weights from the received UDP message
 void parse_weights(const std::string& msg, double& wx, double& wy, double& wyaw, double& wv) {
@@ -184,8 +184,8 @@ int main(int argc, char* argv[]) {
 
     if(mode == "train") {
         std::cout << "[INFO] C++ is running in TRAINING MODE." << std::endl;
-    } else if (mode == "beamng") {
-        std::cout << "[INFO] C++ is running in BEAMNG MODE." << std::endl;
+    } else if (mode == "isaac") {
+        std::cout << "[INFO] C++ is running in ISAAC MODE." << std::endl;
     } else {
         std::cout << "[INFO] C++ is running in NORMAL MODE." << std::endl;
     }
@@ -241,9 +241,9 @@ int main(int argc, char* argv[]) {
     vehicle.reset(Vector4d(0.0, 0.0, 0.0, 0.0)); // init_state [x[m], y[m], yaw[rad], v[m/s]]
 
 
-    // BeamNG mode runs at 20 Hz (0.05 s/tick) and must match delta_t.
-    // Normal simulation mode used delta_t * 2.0; corrected for BeamNG.
-    double mppi_dt = (mode == "beamng") ? delta_t : delta_t * 2.0;
+    // Isaac mode runs at 20 Hz (0.05 s/tick) and must match delta_t.
+    // Normal simulation mode used delta_t * 2.0; corrected for Isaac.
+    double mppi_dt = (mode == "isaac") ? delta_t : delta_t * 2.0;
 
     // initialize a mppi controller for the vehicle
     MPPIController mppi(
@@ -272,9 +272,9 @@ int main(int argc, char* argv[]) {
     {
         Simulate(mppi, vehicle, mode, serverSocket, destAddr, total_reward);
     }
-    else if (mode == "beamng")
+    else if (mode == "isaac")
     {
-        SimulateBeamNG(mppi, serverSocket, destAddr);
+        SimulateIsaac(mppi, serverSocket, destAddr);
     }
     else // train mode
     {
@@ -389,27 +389,27 @@ void Simulate(MPPIController& mppi, Vehicle& vehicle, const std::string& mode, S
 
 
 // ==========================================================================
-// BeamNG integration simulation loop
+// Isaac integration simulation loop
 // ==========================================================================
 // Flow:
 //   1) Wait for StatePacket from Python bridge (real vehicle state)
 //   2) Compute optimal control with MPPI
 //   3) Send ControlPacket back to bridge
 //   4) Repeat
-// Note: the internal Vehicle class is NOT used in this mode - real physics run in BeamNG
+// Note: the internal Vehicle class is NOT used in this mode - real physics run in Isaac
 // ==========================================================================
-void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr) {
-    std::cout << "[BeamNG] Waiting for first state from bridge..." << std::endl;
+void SimulateIsaac(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destAddr) {
+    std::cout << "[Isaac] Waiting for first state from bridge..." << std::endl;
 
     StatePacket state_pkt;
     ControlPacket ctrl_pkt;
 
-    // Block until first state arrives (waits while BeamNG stabilizes)
+    // Block until first state arrives (waits while Isaac stabilizes)
     if (!receiveStatePacket(serverSocket, state_pkt, 0)) {
-        std::cerr << "[BeamNG] Failed to receive first state." << std::endl;
+        std::cerr << "[Isaac] Failed to receive first state." << std::endl;
         return;
     }
-    std::cout << "[BeamNG] Connected. Starting control loop..." << std::endl;
+    std::cout << "[Isaac] Connected. Starting control loop..." << std::endl;
 
     int step = 0;
     int max_steps = 5000; // safety limit
@@ -420,7 +420,7 @@ void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destA
         x0 << state_pkt.x, state_pkt.y, state_pkt.yaw, state_pkt.v;
 
         if (!state_pkt.valid) {
-            std::cout << "[BeamNG] Bridge sent stop signal (valid=0). Exiting." << std::endl;
+            std::cout << "[Isaac] Bridge sent stop signal (valid=0). Exiting." << std::endl;
             break;
         }
 
@@ -430,7 +430,7 @@ void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destA
         try {
             std::tie(u_opt, traj) = mppi.calc_control_input(x0);
         } catch (const std::out_of_range&) {
-            std::cout << "[BeamNG] End of path - completed!" << std::endl;
+            std::cout << "[Isaac] End of path - completed!" << std::endl;
             // reset=1: send "done" signal to Python bridge
             ctrl_pkt.time = state_pkt.time;
             ctrl_pkt.steer = 0.0;
@@ -458,12 +458,12 @@ void SimulateBeamNG(MPPIController& mppi, SOCKET serverSocket, SOCKADDR_IN destA
 
         // 4) Wait for next state (5-second timeout)
         if (!receiveStatePacket(serverSocket, state_pkt, 5000)) {
-            std::cerr << "[BeamNG] State timeout - did the bridge stop?" << std::endl;
+            std::cerr << "[Isaac] State timeout - did the bridge stop?" << std::endl;
             break;
         }
 
         step++;
     }
 
-    std::cout << "[BeamNG] Loop finished. Total steps: " << step << std::endl;
+    std::cout << "[Isaac] Loop finished. Total steps: " << step << std::endl;
 }
