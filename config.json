@@ -1,6 +1,6 @@
 {
   "delta_t": 0.05,
-  "wheel_base": 1.5,
+  "wheel_base": 0.322,
   "max_steer_abs": 0.3,
   "max_accel_abs": 2.5,
   "horizon_step_T": 20,
@@ -42,12 +42,12 @@
     "cbf_weight": 10,
     "decay_rate": 2
   },
-    "REF_PATH_FILE": "data/ovalpath.csv",
-    
-    "COSTMAP_FILE": "data/costmap.csv",
-    "COSTMAP_RESOLUTION": 1.0,
-    "COSTMAP_MARGIN": 10.0,
-    "COSTMAP_GRADIENT_MARGIN": 3.0
+    "REF_PATH_FILE": "data/path_rc_oval.csv",
+
+    "COSTMAP_FILE": "data/costmap_rc.csv",
+    "COSTMAP_RESOLUTION": 0.5,
+    "COSTMAP_MARGIN": 2.0,
+    "COSTMAP_GRADIENT_MARGIN": 1.0
 
     
 }
