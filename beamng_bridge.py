@@ -34,42 +34,28 @@ from beamngpy.sensors import Electrics
 BNG_HOME = r"D:\BeamNG.tech.v0.38.5.0"   # folder containing tech.key
 BNG_USER = r"D:\BeamNg"                   # user folder (must not contain spaces)
 
-# C++ MPPI executable. CMakeLists.txt sets RUNTIME_OUTPUT_DIRECTORY to the
-# source folder, so the exe is produced in the project root. This script
-# launches it automatically in "beamng" mode.
+# C++ MPPI executable.
 MPPI_EXE = "MppiCpp.exe"
 
 CPP_LISTEN_PORT = 5005
 PY_LISTEN_PORT  = 5006
 
-# --- PATH SELECTION ---
-# Pre-generated path options (created with generate_paths.py):
-#   "data/path_straight.csv"   - 150m straight line (simplest sanity-check)
-#   "data/path_sine.csv"       - 120m gentle S-curve (±5m)
-#   "data/path_wide_oval.csv"  - 100×60m oval (R=30m turns)
-#   "data/path_large_oval.csv" - 150×80m oval (R=40m, very easy)
-#   "data/ovalpath.csv"        - ORIGINAL (hard, 1201 wp)
 
 with open("config.json", 'r') as f:
             data = json.load(f)
 
+# --- PATH SELECTION ---
 PATH_CSV = data["REF_PATH_FILE"]
 
 # Effective steering angle [rad] at full lock (steering=1.0) for the BeamNG etk800.
-# From beamng_sysid.py fit: max_delta_eff = 0.76. NOTE: this is NOT a cap;
-# it is the scale factor for the rad -> BeamNG normalized input conversion.
-# Therefore the MPPI command cap (max_steer_abs) in config.json must be SMALLER
-# than this; setting them equal maps the MPPI cap to full lock and causes oversteer.
-MAX_STEER_RAD = 0.3
-MAX_ACCEL = 2.5           # must match config.json max_accel_abs
+MAX_STEER_RAD = data["max_steer_abs"]  # rad 
+MAX_ACCEL = data["max_accel_abs"]      # m/s^2
 
 # Safety: stop if the vehicle deviates more than this distance from the path
-MAX_PATH_DEVIATION = 20.0   # metres (generous tolerance for cornering geometry)
-# Speed ceiling (SAFETY) - clamp the target speed to prevent runaway.
-# ref_v comes from the path file (straight=4.0, ovalpath=2.5); this is only the upper bound.
-V_TARGET_MAX = 5.0          # m/s
-# =============================================
+MAX_PATH_DEVIATION = 20.0   # metres
 
+# Speed ceiling (SAFETY) - clamp the target speed to prevent runaway.
+V_TARGET_MAX = 5.0          # m/s
 
 def quat_to_yaw(qx, qy, qz, qw):
     return math.atan2(2.0 * (qw * qz + qx * qy),
@@ -97,7 +83,7 @@ def accel_to_throttle_brake(accel_cmd, v, _state=[0.0]):
     the earlier approach that bypassed MPPI with a pure PI has been removed.
     """
     dt = 0.05
-    # Convert MPPI accel command to a speed target (with preview horizon so that
+    # Convert MPPI acceleration command to a speed target (with preview horizon so that
     # a brake command actually brakes). NOTE: throttle is intentionally kept gentle
     # and clamped by THROTTLE_CAP. Otherwise the etk800 receives a near-full-throttle
     # command from standstill, spins/launches, the speed sensor (v) goes haywire,
@@ -125,18 +111,9 @@ def accel_to_throttle_brake(accel_cmd, v, _state=[0.0]):
         brake = min(-u, 1.0)
     return throttle, brake
 
-
+# Launches the C++ MPPI exe in "beamng" mode
 def launch_mppi(cpp_listen_port, py_send_port):
-    """
-    Launches the C++ MPPI exe in "beamng" mode and returns a Popen handle.
 
-    C++ argument order (main.cpp): <cpp_listen_port> <py_send_port> <mode>
-      - cpp_listen_port: port C++ listens/binds on -> Python sends state here
-      - py_send_port:    port C++ sends to          -> Python listens here
-
-    Working directory must be the script folder so C++ can find config.json
-    and data/ by relative path. Returns None if the exe is not found.
-    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     exe_path = os.path.join(script_dir, MPPI_EXE)
     if not os.path.isfile(exe_path):
@@ -150,13 +127,30 @@ def launch_mppi(cpp_listen_port, py_send_port):
     return subprocess.Popen(cmd, cwd=script_dir)
 
 
+def full_stop(vehicle, bng, ticks=40):
+    """Bring the car to a firm, latched stop and keep it from driving off.
+
+    Two BeamNG automatic-gearbox gotchas this guards against:
+      * HOLDING the brake at a standstill makes the realistic automatic shift to
+        REVERSE and drive backward forever (the brake input acts as reverse when
+        stopped) -> so once stopped we RELEASE the brake.
+      * to be certain it cannot drive itself in any direction, we force NEUTRAL
+        (gear=0; in neutral no torque reaches the wheels) and latch the PARKING
+        BRAKE.  gear: -1 reverse, 0 neutral, 1.. forward.
+    """
+    for i in range(ticks):
+        brake = 1.0 if i < 12 else 0.0   # brief active brake to stop, then release
+        vehicle.control(throttle=0.0, brake=brake, steering=0.0,
+                        parkingbrake=1.0, gear=0)
+        bng.control.step(1, wait=True)
+    # latch parked: neutral + parking brake, brake released
+    vehicle.control(throttle=0.0, brake=0.0, steering=0.0, parkingbrake=1.0, gear=0)
+
+
 def main():
     print("[Bridge] Controller: MPPI (C++)")
 
-    # --- Auto-launch C++ MPPI exe ---
-    # Launched early: C++ waits indefinitely (blocking) for the first state packet,
-    # so it idles while BeamNG loads. By the time calibration finishes and the
-    # loop starts, the C++ socket is already bound (no packet loss).
+    # --- Launch C++ MPPI exe ---
     mppi_proc = launch_mppi(CPP_LISTEN_PORT, PY_LISTEN_PORT)
     if mppi_proc is None:
         return
@@ -169,6 +163,7 @@ def main():
     print(f"[Bridge] UDP listening on 127.0.0.1:{PY_LISTEN_PORT}")
 
     bng = None
+    vehicle = None
     step_count = 0
     trajectory_world = []
 
@@ -244,7 +239,8 @@ def main():
             s = math.sin(pos_rotation)
             mx = c * dx - s * dy
             my = s * dx + c * dy
-            myaw = wyaw + YAW_OFFSET
+            #  the BeamNG quaternion yaw runs opposite (CW+) to the MPPI
+            myaw = -(wyaw + YAW_OFFSET)
             while myaw > math.pi: myaw -= 2 * math.pi
             while myaw < -math.pi: myaw += 2 * math.pi
             return mx, my, myaw
@@ -347,6 +343,14 @@ def main():
         t_start = time.time()
         last_print_step = 0
 
+        # --- Per-step trajectory log (diagnostics only; no effect on driving) ---
+        run_log = open("run_log.csv", "w", newline="")
+        run_log.write("step,t,mx,my,myaw_deg,v,min_dist,ref_x,ref_y,"
+                      "steer_rad,accel_cmd,throttle,brake\n")
+
+        timeout_count = 0     # consecutive C++ command timeouts
+        last_draw_idx = 0     # last trajectory index drawn live in BeamNG
+
         while True:
             vehicle.sensors.poll()
             s = vehicle.sensors["state"]
@@ -380,7 +384,6 @@ def main():
             if dist_to_end < 5.0 and step_count > 100:
                 print(f"\n[Bridge] PATH COMPLETED: {dist_to_end:.2f}m from end point "
                       f"({step_count} steps, {time.time()-t_start:.1f}s)")
-                vehicle.control(throttle=0.0, brake=1.0, steering=0.0)
                 # Send "stop" signal to C++ (valid=0)
                 stop_bytes = struct.pack("dddddi",
                                           time.time() - t_start,
@@ -388,21 +391,21 @@ def main():
                 for _ in range(3):
                     sock.sendto(stop_bytes, cpp_addr)
                     time.sleep(0.05)
-                for _ in range(40):
-                    bng.control.step(1, wait=True)
+                full_stop(vehicle, bng)   # firm latched stop (parking brake on)
                 break
 
             # Distance to the nearest point on the path.
             # IMPORTANT: scan the full path (was previously limited to the first 600 wp
             # which gave incorrect results on long straight paths).
             # 1501 wp x 1 calculation ~ 0.5ms, no issue.
-            min_dist = min(math.hypot(mx - p[0], my - p[1])
-                           for p in path_points)
+            _nearest = min(path_points,
+                           key=lambda p: math.hypot(mx - p[0], my - p[1]))
+            ref_x, ref_y = _nearest
+            min_dist = math.hypot(mx - ref_x, my - ref_y)
 
             if min_dist > MAX_PATH_DEVIATION:
                 print(f"\n[Bridge] SAFETY STOP: {min_dist:.1f}m deviation from path "
                       f"(limit {MAX_PATH_DEVIATION}m)")
-                vehicle.control(throttle=0.0, brake=1.0, steering=0.0)
                 # Send "stop" signal to C++ (valid=0)
                 stop_bytes = struct.pack("dddddi",
                                           time.time() - t_start,
@@ -410,8 +413,7 @@ def main():
                 for _ in range(3):
                     sock.sendto(stop_bytes, cpp_addr)
                     time.sleep(0.05)
-                for _ in range(20):
-                    bng.control.step(1, wait=True)
+                full_stop(vehicle, bng)   # firm latched stop (parking brake on)
                 break
 
             # ========================================================
@@ -429,8 +431,20 @@ def main():
             # Wait for control command
             try:
                 data, _ = sock.recvfrom(1024)
+                timeout_count = 0
             except socket.timeout:
-                print("[Bridge] C++ command timeout")
+                # MPPI connection lost: stop the car instead of leaving it
+                # uncontrolled (it would otherwise roll backward indefinitely).
+                if mppi_proc.poll() is not None:
+                    print("[Bridge] MPPI exe exited -> stopping vehicle.")
+                    full_stop(vehicle, bng)
+                    break
+                timeout_count += 1
+                print(f"[Bridge] C++ command timeout ({timeout_count})")
+                if timeout_count >= 3:
+                    print("[Bridge] No MPPI response -> stopping vehicle.")
+                    full_stop(vehicle, bng)
+                    break
                 continue
 
             if len(data) != struct.calcsize("dddi"):
@@ -462,8 +476,24 @@ def main():
 
             vehicle.control(steering=steer_norm, throttle=throttle, brake=brake)
 
+            run_log.write(f"{step_count},{time.time()-t_start:.3f},{mx:.3f},{my:.3f},"
+                          f"{math.degrees(myaw):.2f},{v:.3f},{min_dist:.3f},"
+                          f"{ref_x:.3f},{ref_y:.3f},{steer_rad:.4f},{accel_cmd:.4f},"
+                          f"{throttle:.3f},{brake:.3f}\n")
+            run_log.flush()
+
             bng.control.step(1, wait=True)
             step_count += 1
+
+            # RED trajectory drawn live in BeamNG
+            if len(trajectory_world) - last_draw_idx >= 3:
+                try:
+                    seg = [(x, y, 0.3) for (x, y) in trajectory_world[last_draw_idx:]]
+                    bng.debug.add_polyline(seg, rgba_color=(1.0, 0.1, 0.1, 1.0),
+                                           cling=True, offset=0.2)
+                    last_draw_idx = len(trajectory_world) - 1   # overlap 1 to connect
+                except Exception:
+                    pass
 
             if step_count - last_print_step >= 10:
                 dt = time.time() - t_start
@@ -481,18 +511,21 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
-        # Draw the actual trajectory as a RED line
         try:
-            if bng is not None and len(trajectory_world) > 1:
-                traj_3d = [(x, y, 0.3) for (x, y) in trajectory_world]
-                bng.debug.add_polyline(traj_3d,
-                                       rgba_color=(1.0, 0.1, 0.1, 1.0),
-                                       cling=True, offset=0.2)
-                print(f"\n[Bridge] Actual trajectory drawn in BeamNG (red)")
-                print("Blue = reference path, Red = actual trajectory")
-                input("Inspect in the BeamNG window then press Enter...")
-        except Exception as e:
-            print(f"Could not draw trajectory: {e}")
+            run_log.close()
+            print("[Bridge] run_log.csv written")
+        except Exception:
+            pass
+        # Make sure the car is parked (also covers Ctrl+C / exception exits): NEUTRAL
+        # + parking brake, brake released. Do NOT hold the brake here - at a standstill
+        # that makes the automatic shift to reverse and drive backward.
+        try:
+            if vehicle is not None:
+                vehicle.control(throttle=0.0, brake=0.0, steering=0.0,
+                                parkingbrake=1.0, gear=0)
+        except Exception:
+            pass
+
 
         sock.close()
         if bng is not None:

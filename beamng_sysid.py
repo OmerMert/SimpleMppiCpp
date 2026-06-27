@@ -39,6 +39,11 @@ STEADY_STATE_TIME = 5.0   # seconds to hold steady
 SETTLE_TIME = 3.0         # seconds to reach target speed first
 
 PHYSICS_HZ = 50
+
+# Physical wheelbase of the etk800, measured from the jbeam axle nodes
+# (front hub ~ y=-1.43 m, rear hub ~ y=+1.40 m -> ~2.82 m). L is NOT fitted
+# (it is unidentifiable from steady-state yaw); we pin it to this real value.
+PHYS_WHEELBASE = 2.82
 # =============================================
 
 
@@ -115,44 +120,42 @@ def drive_constant(bng, vehicle, v_target, steer_norm, duration_s,
 
 
 def fit_bicycle_parameters(measurements):
-    """Fit L_eff and max_delta from a list of (v, steer_norm, yaw_rate) measurements.
+    """Identify the etk800 steering response from (v, steer_norm, yaw_rate).
 
-    Model: yaw_rate = (v / L) * tan(steer_norm * max_delta)
-
-    Two-unknown nonlinear least squares.
-    Solved via simple grid search (robust, no gradient needed).
+    IMPORTANT (see analyze_sysid.py): in steady state, L and max_delta are NOT
+    separately identifiable -- only the linear-region gain
+        G = yaw_rate / (v * steer_norm)
+    is. A 2-unknown fit just rails L to the grid boundary. So the primary,
+    physically-meaningful output here is G. The wheelbase L is taken from the
+    REAL vehicle geometry (PHYS_WHEELBASE), and max_delta is reported only as a
+    derived, gauge-dependent quantity (max_delta ~= atan(G * L)).
     """
     # Data arrays
     vs = np.array([m['v'] for m in measurements])
     ss = np.array([m['steer_norm'] for m in measurements])
     yrs = np.array([m['yaw_rate'] for m in measurements])
 
-    # Grid search range
-    L_candidates = np.linspace(1.5, 4.5, 61)         # L in [1.5, 4.5] m
-    max_delta_candidates = np.linspace(0.2, 0.9, 71) # max_delta in [0.2, 0.9] rad
+    # --- Primary identifiable quantity: linear-region yaw-rate gain G ---
+    lin = np.abs(ss) <= 0.5     # stay in the linear regime
+    g_samples = yrs[lin] / (vs[lin] * ss[lin])
+    gain_G = float(np.mean(g_samples))
+    gain_G_std = float(np.std(g_samples))
 
-    best_err = float('inf')
-    best_L = None
-    best_max_delta = None
+    # --- Pin L to physical wheelbase, derive max_delta from the gain ---
+    L_phys = PHYS_WHEELBASE
+    max_delta = float(np.arctan(gain_G * L_phys))   # so (1/L)*tan(max_delta) ~= G
 
-    for L in L_candidates:
-        for max_delta in max_delta_candidates:
-            pred = (vs / L) * np.tan(ss * max_delta)
-            err = np.sum((pred - yrs) ** 2)
-            if err < best_err:
-                best_err = err
-                best_L = L
-                best_max_delta = max_delta
-
-    # Residual analysis
-    pred = (vs / best_L) * np.tan(ss * best_max_delta)
+    # Residual of the resulting model over ALL points (incl. nonlinear ones)
+    pred = (vs / L_phys) * np.tan(ss * max_delta)
     residuals = yrs - pred
-    rms_err = np.sqrt(np.mean(residuals ** 2))
-    rel_err = rms_err / (np.mean(np.abs(yrs)) + 1e-6)
+    rms_err = float(np.sqrt(np.mean(residuals ** 2)))
+    rel_err = float(rms_err / (np.mean(np.abs(yrs)) + 1e-6))
 
     return {
-        'L_eff': best_L,
-        'max_delta_eff': best_max_delta,
+        'gain_G': gain_G,
+        'gain_G_std': gain_G_std,
+        'L_eff': L_phys,                 # physical, not fitted
+        'max_delta_eff': max_delta,      # derived from G (gauge-dependent)
         'rms_err': rms_err,
         'rel_err': rel_err,
     }
@@ -226,13 +229,16 @@ def main():
 
     fit = fit_bicycle_parameters(measurements)
 
-    print(f"\nFitted parameters:")
-    print(f"  L_eff (effective wheelbase):  {fit['L_eff']:.3f} m")
-    print(f"  max_delta_eff (effective max steer): {fit['max_delta_eff']:.4f} rad "
+    print(f"\nIdentified (BeamNG = reference):")
+    print(f"  yaw-rate gain G:  {fit['gain_G']:.4f} +/- {fit['gain_G_std']:.4f}"
+          f"   [rad/s per (m/s * steer_norm)]")
+    print(f"  wheel_base (PHYSICAL, pinned): {fit['L_eff']:.3f} m")
+    print(f"  max_delta (derived, gauge):    {fit['max_delta_eff']:.4f} rad "
           f"({math.degrees(fit['max_delta_eff']):.2f} deg)")
-    print(f"\nFit quality:")
+    print(f"\nModel fit quality (kinematic bicycle, all points):")
     print(f"  RMS error:      {fit['rms_err']:.4f} rad/s")
-    print(f"  Relative error: {fit['rel_err']*100:.1f}%")
+    print(f"  Relative error: {fit['rel_err']*100:.1f}%   "
+          f"(dominated by saturated full-lock points; linear region is exact by construction)")
 
     # Predicted vs actual table for each measurement
     print(f"\nMeasurement | v    | steer_norm | yaw_rate_actual | yaw_rate_pred | err")
@@ -249,14 +255,23 @@ def main():
     with open(ORIGINAL_CONFIG, "r") as f:
         cfg = json.load(f)
 
+    # Pin wheel_base to the physical value. DO NOT overwrite max_steer_abs:
+    # it is the MPPI command cap (kept conservative for the linear regime),
+    # NOT the effective full-lock angle. The bridge derives its rad->norm scale
+    # as MAX_STEER_RAD = gain_G * wheel_base.
     cfg['wheel_base'] = round(fit['L_eff'], 3)
-    cfg['max_steer_abs'] = round(fit['max_delta_eff'], 4)
-    cfg['_calibration_info'] = {
-        'source': 'beamng_sysid.py',
+    cfg['beamng_calibration'] = {
+        'source': 'beamng_sysid.py (BeamNG = reference)',
         'vehicle': 'etk800',
         'num_measurements': len(measurements),
+        'wheel_base_source': 'physical (jbeam axle nodes)',
+        'yaw_rate_gain_G': round(fit['gain_G'], 4),
+        'yaw_rate_gain_std': round(fit['gain_G_std'], 4),
+        'yaw_rate_gain_units': 'rad/s per (m/s * steer_norm), linear region |steer_norm|<=0.5',
+        'yaw_model': 'yaw_rate = (v / wheel_base) * tan(steer_rad); steer_norm = steer_rad / (G * wheel_base)',
         'rms_error_rad_s': round(fit['rms_err'], 4),
         'relative_error_pct': round(fit['rel_err'] * 100, 2),
+        'identifiability_note': 'L unidentifiable from steady-state yaw (only ratio G); L pinned to physical value.',
     }
 
     with open(CONFIG_FILE_OUT, "w") as f:
@@ -264,8 +279,10 @@ def main():
 
     print(f"[SysID] New config: {CONFIG_FILE_OUT}")
     print(f"[SysID] Changes:")
-    print(f"         wheel_base: {cfg['wheel_base']} m")
-    print(f"         max_steer_abs: {cfg['max_steer_abs']} rad")
+    print(f"         wheel_base: {cfg['wheel_base']} m (physical)")
+    print(f"         yaw gain G: {round(fit['gain_G'], 4)}  -> bridge MAX_STEER_RAD = "
+          f"{round(fit['gain_G'] * cfg['wheel_base'], 3)}")
+    print(f"         max_steer_abs left unchanged: {cfg['max_steer_abs']} rad (MPPI cap)")
 
     # Save raw data (for thesis plots)
     np.savetxt("sysid_measurements.csv",
