@@ -40,9 +40,7 @@ __device__ float compute_cbf_cost(
     {
     float total_barrier_cost = 0.0f;
     
-    float robot_radius = sqrtf(vw*vw + vl*vl) / 2.0f; 
-
-    // Hard Collision Check
+    // Vehicle body key points (same footprint as the hard collision check).
     float local_x[9] = {-0.5f*vl, -0.5f*vl, -0.5f*vl,  0.0f,      0.0f,     0.0f,     0.5f*vl, 0.5f*vl, 0.5f*vl};
     float local_y[9] = {-0.5f*vw,  0.0f,     0.5f*vw,  0.5f*vw,  -0.5f*vw,  0.0f,     0.5f*vw, 0.0f,   -0.5f*vw};
     float c = cosf(yaw);
@@ -52,32 +50,26 @@ __device__ float compute_cbf_cost(
         float obs_x = obstacles[i].x;
         float obs_y = obstacles[i].y;
         float obs_r = obstacles[i].r;
-        
-        bool collision = false;
-        float r_sq = obs_r * obs_r;
+
+        // Closest approach of ANY body key point to the obstacle SURFACE.
+        // Footprint-based (NOT a circumscribing circle): the old
+        // robot_radius = 0.5*sqrt(vw^2+vl^2) treated a 4.8 m car as a 3 m-radius
+        // disk -> a ~5 m keep-out -> avoidance needed a ~4 m swerve -> infeasible,
+        // so the car just stopped. Using the real footprint keeps it feasible.
+        float min_h = 1e10f;
         for(int p = 0; p < 9; ++p) {
-            float global_px = (local_x[p] * c - local_y[p] * s) + x;
-            float global_py = (local_x[p] * s + local_y[p] * c) + y;
-            float dist_sq = (global_px - obs_x)*(global_px - obs_x) + (global_py - obs_y)*(global_py - obs_y);
-            if(dist_sq < r_sq) {
-                collision = true;
-                break;
-            }
-        }
-        
-        if (collision) {
-            return 1000000000.0f;
+            float gpx = (local_x[p] * c - local_y[p] * s) + x;
+            float gpy = (local_x[p] * s + local_y[p] * c) + y;
+            float d = sqrtf((gpx - obs_x)*(gpx - obs_x) + (gpy - obs_y)*(gpy - obs_y));
+            float h = d - obs_r;
+            if (h < min_h) min_h = h;
         }
 
-        float dx = x - obs_x;
-        float dy = y - obs_y;
-        float dist = sqrtf(dx*dx + dy*dy);
-        
-        float h_x = dist - (obs_r + robot_radius);
-        
-        if (h_x < influence_radius) {
-            float cost = cbf_weight * expf(-decay_rate * h_x);
-            total_barrier_cost += cost;
+        if (min_h <= 0.0f) {
+            return 1000000000.0f;   // a key point is inside the obstacle -> collision
+        }
+        if (min_h < influence_radius) {
+            total_barrier_cost += cbf_weight * expf(-decay_rate * min_h);
         }
     }
     

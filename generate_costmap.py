@@ -34,16 +34,16 @@ import os
 #   (x, y, radius)           -> circular obstacle
 #   (x, y, width, height)    -> rectangular obstacle
 
-OBSTACLES = [
-    (8.0, 5.0, 4.0),           # Circle: center=(8, 5), r=4m
-    (18.0, -5.0, 4.0),         # Circle: center=(18, -5), r=4m
-]
+# Obstacles are now defined in config.json ("OBSTACLES") so the costmap (for MPPI)
+# and the physical BeamNG obstacles share ONE source. Format (MPPI frame, metres):
+#   [x, y, r]        -> circle
+#   [x, y, w, h]     -> rectangle
 
 # ================================================================
 
 
 def load_config(config_path="config.json"):
-    """Read map parameters from config."""
+    """Read map parameters AND obstacles from config (single source of truth)."""
     with open(config_path, 'r') as f:
         cfg = json.load(f)
 
@@ -51,8 +51,9 @@ def load_config(config_path="config.json"):
     margin = cfg["COSTMAP_MARGIN"]
     costmap_file = cfg["COSTMAP_FILE"]
     ref_path_file = cfg["REF_PATH_FILE"]
+    obstacles = [tuple(o) for o in cfg.get("OBSTACLES", [])]
 
-    return resolution, margin, costmap_file, ref_path_file
+    return resolution, margin, costmap_file, ref_path_file, obstacles
 
 
 def load_ref_path(filepath):
@@ -191,13 +192,13 @@ def main():
     print("  COSTMAP GENERATOR")
     print("=" * 60)
 
-    # Read config
-    resolution, margin, costmap_file, ref_path_file = load_config()
+    # Read config (incl. obstacles)
+    resolution, margin, costmap_file, ref_path_file, obstacles = load_config()
     print(f"Resolution: {resolution} m/cell")
     print(f"Margin: {margin} m")
     print(f"Output: {costmap_file}")
     print(f"Ref path: {ref_path_file}")
-    print(f"Obstacle count: {len(OBSTACLES)}")
+    print(f"Obstacle count: {len(obstacles)}")
     print()
 
     # Load reference path
@@ -210,14 +211,14 @@ def main():
     # Build grid
     print("Building obstacles:")
     grid, x_min, y_min, x_max, y_max = generate_costmap(
-        OBSTACLES, resolution, margin, ref_xs, ref_ys)
+        obstacles, resolution, margin, ref_xs, ref_ys)
 
     # Save
     save_costmap(grid, costmap_file)
 
     # Preview
     preview_path = costmap_file.replace('.csv', '_preview.png')
-    save_preview(grid, ref_xs, ref_ys, OBSTACLES,
+    save_preview(grid, ref_xs, ref_ys, obstacles,
                  x_min, x_max, y_min, y_max, preview_path)
 
     print("\n" + "=" * 60)

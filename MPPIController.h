@@ -88,9 +88,9 @@ private:
     Vector4d stage_cost_weight;
     Vector4d terminal_cost_weight;
     std::vector<Obstacle> obstacles;
-    double vehicle_width = 3.0;
-    double vehicle_length = 4.0;
-    double safety_margin_rate = 1.2;
+    double vehicle_width = 1.9;    // realistic etk800 width [m] (was 3.0, too wide)
+    double vehicle_length = 4.5;   // realistic etk800 length [m]
+    double safety_margin_rate = 1.15;
 
     // Vehicle parameters
     double dt;

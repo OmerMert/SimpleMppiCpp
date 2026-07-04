@@ -27,7 +27,7 @@ import time
 import csv
 import json
 
-from beamngpy import BeamNGpy, Scenario, Vehicle
+from beamngpy import BeamNGpy, Scenario, Vehicle, ProceduralCylinder, ProceduralCube
 from beamngpy.sensors import Electrics
 
 # ============ USER SETTINGS ============
@@ -46,6 +46,11 @@ with open("config.json", 'r') as f:
 
 # --- PATH SELECTION ---
 PATH_CSV = data["REF_PATH_FILE"]
+
+# Obstacles: SAME list the costmap is built from (config.json "OBSTACLES").
+# MPPI-frame: [x, y, r] circle or [x, y, w, h] rectangle. Spawned physically in
+# BeamNG so MPPI (avoids via costmap) and the real car (collides) share one source.
+OBSTACLES = data.get("OBSTACLES", [])
 
 # Effective steering angle [rad] at full lock (steering=1.0) for the BeamNG etk800.
 MAX_STEER_RAD = data["max_steer_abs"]  # rad 
@@ -187,6 +192,28 @@ def main():
         # IDENTITY spawn - calibration is performed below
         scenario.add_vehicle(vehicle, pos=(0.0, 0.0, 0.5),
                              rot_quat=(0.0, 0.0, 0.0, 1.0))
+
+        # --- Physical obstacles (must be added BEFORE scenario.make) ---
+        # config OBSTACLES are in the MPPI frame; map to BeamNG world with the
+        # nominal spawn transform (spawn at origin, identity quaternion ->
+        # pos_rotation=+90deg, so MPPI (x,y) -> world (y, -x)). Circle->cylinder,
+        # rectangle->cube. The +90deg rotation swaps the rect's w/h extents.
+        OBS_HEIGHT = 2.0
+        for oi, obs in enumerate(OBSTACLES):
+            ox, oy = obs[0], obs[1]
+            wx, wy = oy, -ox                      # MPPI -> BeamNG world
+            if len(obs) == 3:                     # circle: [x, y, r]
+                scenario.add_procedural_mesh(ProceduralCylinder(
+                    pos=(wx, wy, OBS_HEIGHT / 2.0), radius=obs[2],
+                    height=OBS_HEIGHT, name=f"obstacle_{oi}"))
+            elif len(obs) == 4:                   # rectangle: [x, y, w, h]
+                w, h = obs[2], obs[3]
+                scenario.add_procedural_mesh(ProceduralCube(
+                    pos=(wx, wy, OBS_HEIGHT / 2.0), size=(h, w, OBS_HEIGHT),
+                    name=f"obstacle_{oi}"))
+        if OBSTACLES:
+            print(f"[Bridge] Spawned {len(OBSTACLES)} physical obstacle(s) in BeamNG")
+
         scenario.make(bng)
 
         bng.settings.set_deterministic(20)  # 20 Hz = MPPI delta_t 0.05
@@ -273,6 +300,7 @@ def main():
         # --- CALIBRATION TEST ---
         # Apply straight throttle for 30 ticks, bypassing MPPI.
         # The vehicle should move in the +x direction in MPPI frame (> 1m forward).
+        '''
         for i in range(30):
             vehicle.control(steering=0.0, throttle=0.3, brake=0.0)
             bng.control.step(1, wait=True)
@@ -281,7 +309,7 @@ def main():
         s_test = vehicle.sensors["state"]
         px_t, py_t, _ = s_test["pos"]
         mx_t, my_t, myaw_t = world_to_mppi(px_t, py_t,
-                                             quat_to_yaw(*s_test["rotation"]))
+                                             quat_to_yaw *s_test["rotation"]))
         print(f"[Bridge] Calibration result: after 30 ticks MPPI=({mx_t:+.2f}, {my_t:+.2f}) "
               f"yaw={math.degrees(myaw_t):+.1f}deg")
         # Check both position and yaw
@@ -300,7 +328,7 @@ def main():
         vehicle.control(steering=0.0, throttle=0.0, brake=1.0)
         for _ in range(20):
             bng.control.step(1, wait=True)
-
+'''
         # Teleport the vehicle back to (0,0) in MPPI frame.
         # NOTE: the calibration test may have changed the vehicle's orientation.
         # Re-apply the spawn quaternion to also reset the heading.
@@ -460,7 +488,10 @@ def main():
             steer_raw = max(-1.0, min(1.0, steer_raw))
             steer_target = steer_raw
 
-            # Symmetric slew-rate limiter
+            # Symmetric slew-rate limiter. NOTE: tightening this to damp the weave
+            # (tried 0.10) adds steering lag and the car can't corner in time ->
+            # keep it loose (0.30). The weave is better reduced at the source (MPPI
+            # sampling noise sigma) than by a hard external rate cap.
             if 'prev_steer' not in _bridge_state:
                 _bridge_state['prev_steer'] = 0.0
             prev = _bridge_state['prev_steer']
