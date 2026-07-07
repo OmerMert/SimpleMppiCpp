@@ -72,7 +72,7 @@ __device__ float compute_cbf_cost(
             total_barrier_cost += cbf_weight * expf(-decay_rate * min_h);
         }
     }
-    
+
     return total_barrier_cost;
 }
 
@@ -105,10 +105,11 @@ __device__ bool check_collision_gpu(
 }
 
 __device__ void get_nearest_waypoint_gpu(
-    float x, float y, 
-    const float* path_points, int path_size, 
-    int prev_idx, 
-    float* ref_x, float* ref_y, float* ref_yaw, float* ref_v
+    float x, float y,
+    const float* path_points, int path_size,
+    int prev_idx,
+    float* ref_x, float* ref_y, float* ref_yaw, float* ref_v,
+    const Obstacle* obstacles, int num_obs
 ) {
     float min_dist_sq = 1e10f;
     int nearest = prev_idx;
@@ -137,7 +138,9 @@ __device__ void get_nearest_waypoint_gpu(
     *ref_y   = path_points[nearest * 4 + 1];
     *ref_yaw = path_points[nearest * 4 + 2];
     *ref_v   = path_points[nearest * 4 + 3];
-
+    // (reference-detour removed: it was hardcoded to the -y side, which only works
+    //  for obstacles above the path. For side obstacles on EITHER side the CBF
+    //  footprint gradient already pushes the car to the correct side.)
 }
 
 __global__ void mppi_rollout_kernel(
@@ -254,7 +257,7 @@ __global__ void mppi_rollout_kernel(
 
     // Terminal Cost: local_waypoint_idx reflects the position at the end of the horizon
     float rx, ry, ryaw, rv;
-    get_nearest_waypoint_gpu(x, y, ref_path, path_size, local_waypoint_idx, &rx, &ry, &ryaw, &rv);
+    get_nearest_waypoint_gpu(x, y, ref_path, path_size, local_waypoint_idx, &rx, &ry, &ryaw, &rv, obstacles, num_obs);
 
     float term_yaw_diff = normalize_angle_diff(yaw - ryaw);
 

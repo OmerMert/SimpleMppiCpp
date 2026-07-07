@@ -29,6 +29,10 @@ float influence_radius;
 float cbf_weight;
 float decay_rate;
 
+// Obstacles read DIRECTLY from config (exact circles), NOT the lossy costmap grid
+// extraction (which inflates the radius, e.g. 1.5 -> 2.2, making MPPI over-avoid).
+std::vector<Obstacle> config_obstacles;
+
 std::string ref_path_filepath;
 // Cost Map Parameters
 double costmap_resolution;
@@ -96,6 +100,24 @@ void ReadConfig() {
     costmap_margin           = cfg["COSTMAP_MARGIN"];
     costmap_gradient_margin  = cfg["COSTMAP_GRADIENT_MARGIN"];
     costmap_filepath         = cfg["COSTMAP_FILE"];
+
+    // Obstacles for MPPI's CBF: read the exact circles from config (see note above).
+    config_obstacles.clear();
+    if (cfg.contains("OBSTACLES")) {
+        for (const auto& o : cfg["OBSTACLES"]) {
+            if (o.size() < 3) continue;
+            Obstacle ob;
+            ob.x = (float)o[0];
+            ob.y = (float)o[1];
+            if (o.size() == 3) {
+                ob.r = (float)o[2];                                   // [x, y, r] circle
+            } else {                                                  // [x, y, w, h] rect
+                float w = (float)o[2], h = (float)o[3];
+                ob.r = 0.5f * std::sqrt(w * w + h * h);               // circumscribing circle
+            }
+            config_obstacles.push_back(ob);
+        }
+    }
 }
 
 
@@ -225,8 +247,10 @@ int main(int argc, char* argv[]) {
     }
     CostMapGenerator& costmap_gen = *costmap_gen_ptr;
  
-    // Get extracted obstacles for MPPI (circles derived from grid)
-    const auto& obstacles = costmap_gen.getObstacles();
+    // Obstacles for MPPI: DIRECTLY from config (exact physical circles) so MPPI's
+    // avoidance target == the BeamNG physical obstacle. The costmap grid extraction
+    // inflated the radius (1.5 -> 2.2) which made MPPI over-avoid / block the corridor.
+    const auto& obstacles = config_obstacles;
  
     // Get cost map with gradients for RL
     const auto& global_costmap = costmap_gen.getCostMap();

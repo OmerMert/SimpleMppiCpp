@@ -38,13 +38,23 @@
     },
     "OBSTACLES": [
         [
-            12.0,
-            3.0,
-            2.0
+            4.0,
+            2.5,
+            1.5
+        ],
+        [
+            11.0,
+            -2.5,
+            1.5
+        ],
+        [
+            18.0,
+            2.5,
+            1.5
         ]
     ],
     "CBF_PARAMETERS": {
-        "influence_radius": 1.0,
+        "influence_radius": 0.2,
         "cbf_weight": 10,
         "decay_rate": 2
     },

@@ -90,7 +90,11 @@ private:
     std::vector<Obstacle> obstacles;
     double vehicle_width = 1.9;    // realistic etk800 width [m] (was 3.0, too wide)
     double vehicle_length = 4.5;   // realistic etk800 length [m]
-    double safety_margin_rate = 1.15;
+    double safety_margin_rate = 1.0;   // model footprint == real car. 1.15 inflated the
+                                       // half-width to 1.09 > the 1.0 m gap to a side obstacle,
+                                       // so y=0 (the reference line) read as a collision and the
+                                       // car fled ~1 m and braked/stalled. 1.0 keeps y=0 feasible
+                                       // (min_h=0.05) so only a gentle ~0.3 m swerve is needed.
 
     // Vehicle parameters
     double dt;
