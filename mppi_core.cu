@@ -31,20 +31,18 @@ __device__ void update_state_gpu(
 
 }
 
-// Roughness (offroad) lookup: samples the terrain-roughness grid at a world point.
-// The grid is produced by generate_roughness.py from the SAME config ROUGHNESS zones
-// that build the physical BeamNG terrain, so the planner's "rough here" and the real
-// bumpy ground come from one source. Outside the map -> 0 (treated as smooth).
-__device__ float sample_roughness(
+// Costmap grid lookup: samples a grid at a world point (nearest cell).
+// Used by the additive obstacle costmap. Outside the map -> 0.
+__device__ float sample_grid(
     float x, float y,
-    const float* rough, int rows, int cols,
+    const float* grid, int rows, int cols,
     float res, float x_min, float y_min)
 {
-    if (rough == nullptr || rows <= 0 || cols <= 0) return 0.0f;
+    if (grid == nullptr || rows <= 0 || cols <= 0) return 0.0f;
     int c = (int)floorf((x - x_min) / res);
     int r = (int)floorf((y - y_min) / res);
     if (c < 0 || c >= cols || r < 0 || r >= rows) return 0.0f;
-    return rough[r * cols + c];
+    return grid[r * cols + c];
 }
 
 // CBF Function
@@ -175,8 +173,6 @@ __global__ void mppi_rollout_kernel(
     float max_steer, float max_accel, float wheelbase,
     float vehicle_w, float vehicle_l,
     float influence_radius, float cbf_weight, float decay_rate,
-    const float* roughness, int rough_rows, int rough_cols,
-    float rough_res, float rough_x_min, float rough_y_min, float roughness_weight,
     const float* obstacle_costmap, int obs_rows, int obs_cols,
     float obs_res, float obs_x_min, float obs_y_min, float obstacle_costmap_weight
 ) {
@@ -259,27 +255,13 @@ __global__ void mppi_rollout_kernel(
         stage_cost += compute_cbf_cost(x, y, yaw, obstacles, num_obs, vehicle_w, vehicle_l,
                                        influence_radius, cbf_weight, decay_rate);
 
-        // Terrain roughness (offroad: SOFT cost) - VELOCITY-CONDITIONED.
-        // Multiplying by v^2 makes "being fast on rough ground" expensive, so the car
-        // SLOWS DOWN over rough terrain instead of trying to steer around it. That is
-        // both the physically sensible offroad behaviour and the only one that works
-        // here: the position weight (w_y=20) is far too strong for a lateral detour to
-        // ever pay off. Resulting speed in a rough patch (balancing against the speed
-        // cost w_v) is roughly:
-        //     v_rough ~= v_ref * w_v / (w_v + roughness_weight * roughness)
-        if (roughness_weight > 0.0f) {
-            float rough = sample_roughness(x, y, roughness, rough_rows, rough_cols,
-                                           rough_res, rough_x_min, rough_y_min);
-            stage_cost += roughness_weight * rough * v * v;
-        }
-
         // Obstacle costmap: EXTRA soft cost on top of compute_cbf_cost() above.
         // Does NOT replace the CBF (that remains the exact, footprint/yaw-aware
         // collision avoidance) - this is a coarse (x,y)-only grid, disabled by
         // default (weight 0), see config.json OBSTACLE_COSTMAP_WEIGHT.
         if (obstacle_costmap_weight > 0.0f) {
-            float obs_cost = sample_roughness(x, y, obstacle_costmap, obs_rows, obs_cols,
-                                              obs_res, obs_x_min, obs_y_min);
+            float obs_cost = sample_grid(x, y, obstacle_costmap, obs_rows, obs_cols,
+                                         obs_res, obs_x_min, obs_y_min);
             stage_cost += obstacle_costmap_weight * obs_cost;
         }
 
@@ -335,14 +317,11 @@ extern "C" void launch_mppi_gpu(
     float max_steer, float max_accel, float wheelbase,
     float vehicle_w_param, float vehicle_l_param, float safety_margin,
     float influence_radius_param, float cbf_weight_param, float decay_rate_param,
-    const float* h_roughness, int rough_rows, int rough_cols,
-    float rough_res, float rough_x_min, float rough_y_min, float roughness_weight,
     const float* h_obstacle_costmap, int obs_rows, int obs_cols,
     float obs_res, float obs_x_min, float obs_y_min, float obstacle_costmap_weight
 ) {
     float *d_state, *d_u, *d_noise, *d_path, *d_costs;
     Obstacle *d_obs;
-    float *d_rough = nullptr;
     float *d_obs_costmap = nullptr;
 
     cudaMalloc(&d_state, 4 * sizeof(float));
@@ -357,14 +336,6 @@ extern "C" void launch_mppi_gpu(
     cudaMemcpy(d_noise, h_noise, K * T * 2 * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_path, h_ref_path, path_size * 4 * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_obs, h_obstacles, num_obs * sizeof(Obstacle), cudaMemcpyHostToDevice);
-
-    // Roughness grid (optional: only when a map is loaded and the weight is non-zero)
-    const int rough_cells = rough_rows * rough_cols;
-    const bool use_roughness = (h_roughness != nullptr && rough_cells > 0 && roughness_weight > 0.0f);
-    if (use_roughness) {
-        cudaMalloc(&d_rough, rough_cells * sizeof(float));
-        cudaMemcpy(d_rough, h_roughness, rough_cells * sizeof(float), cudaMemcpyHostToDevice);
-    }
 
     // Obstacle costmap grid (optional, additive on top of the analytic CBF).
     const int obs_cells = obs_rows * obs_cols;
@@ -390,9 +361,6 @@ extern "C" void launch_mppi_gpu(
         max_steer, max_accel, wheelbase,
         final_w, final_l,
         influence_radius_param, cbf_weight_param, decay_rate_param,
-        d_rough, rough_rows, rough_cols,
-        rough_res, rough_x_min, rough_y_min,
-        use_roughness ? roughness_weight : 0.0f,
         d_obs_costmap, obs_rows, obs_cols,
         obs_res, obs_x_min, obs_y_min,
         use_obstacle_costmap ? obstacle_costmap_weight : 0.0f
@@ -405,6 +373,5 @@ extern "C" void launch_mppi_gpu(
 
     cudaFree(d_state); cudaFree(d_u); cudaFree(d_noise);
     cudaFree(d_path); cudaFree(d_costs); cudaFree(d_obs);
-    if (d_rough) cudaFree(d_rough);
     if (d_obs_costmap) cudaFree(d_obs_costmap);
 }

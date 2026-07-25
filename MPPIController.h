@@ -41,8 +41,6 @@ extern "C" void launch_mppi_gpu(
         float max_steer, float max_accel, float wheelbase,
     float vehicle_w_param, float vehicle_l_param, float safety_margin,
     float influence_radius_param, float cbf_weight_param, float decay_rate_param,
-    const float* h_roughness, int rough_rows, int rough_cols,
-    float rough_res, float rough_x_min, float rough_y_min, float roughness_weight,
     const float* h_obstacle_costmap, int obs_rows, int obs_cols,
     float obs_res, float obs_x_min, float obs_y_min, float obstacle_costmap_weight
 );
@@ -73,13 +71,6 @@ public:
 
     // Returns: [ref_x, ref_y, ref_yaw, ref_v]
     Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
-
-    // Offroad: attach the terrain-roughness grid used as a SOFT cost in the rollouts.
-    // Grid is row-major (rows x cols); cell (r,c) center is at
-    // (x_min + (c+0.5)*resolution, y_min + (r+0.5)*resolution).
-    // Not calling this (or weight <= 0) simply disables the roughness term.
-    void set_roughness_map(const std::vector<float>& data, int rows, int cols,
-                           float resolution, float x_min, float y_min, float weight);
 
     // Obstacle costmap: EXTRA soft cost added on top of the analytic CBF (does NOT
     // replace it - the CBF footprint/collision logic in mppi_core.cu is untouched).
@@ -120,12 +111,6 @@ private:
     float influence_radius;
     float cbf_weight;
     float decay_rate;
-
-    // Terrain roughness (offroad soft cost); empty/weight 0 -> term disabled
-    std::vector<float> roughness_data;
-    int   rough_rows = 0, rough_cols = 0;
-    float rough_res = 1.0f, rough_x_min = 0.0f, rough_y_min = 0.0f;
-    float roughness_weight = 0.0f;
 
     // Obstacle costmap (EXTRA cost, additive to the CBF); empty/weight 0 -> disabled
     std::vector<float> obstacle_costmap_data;

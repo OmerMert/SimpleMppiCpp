@@ -1,20 +1,18 @@
 """
-generate_costmaps.py - scenario.py'deki engel + engebe tanimlarindan IKI costmap
-uretir + C++ tarafinin okuyacagi ham engel listesini disari yazar.
+generate_costmaps.py - scenario.py'deki engel tanimlarindan engel costmap'i uretir
++ C++ tarafinin okuyacagi ham engel listesini disari yazar.
 
-Girdi (tek kaynak): scenario.py OBSTACLES + ROUGHNESS.
+Girdi (tek kaynak): scenario.py OBSTACLES.
 Ciktilar (config.json'daki *_FILE anahtarlariyla eslesir):
   - data/obstacle_costmap.csv   : engel maliyet grid'i (MPPI'daki CBF'ye EK, onu
                                    degistirmez - bkz. obstacles.py docstring)
-  - data/roughness_costmap.csv  : engebe (roughness) YUMUSAK maliyet grid'i
   - data/obstacles.json         : ham engel listesi (C++ CBF + BeamNG fiziksel
                                    spawn icin - bunlar costmap DEGIL, tam gecen
                                    cemberler/dikdortgenler gerektirir)
-  - data/obstacle_costmap_preview.png, data/roughness_costmap_preview.png
+  - data/obstacle_costmap_preview.png
 
-Grid sinirlari (x_min..x_max, y_min..y_max) referans yol + GRID_MARGIN'dan
-gelir ve iki costmap de AYNI sinirlari/cozunurlugu kullanir (main.cpp bu
-varsayimla hizalanir - bkz. main.cpp ReadConfig).
+Grid sinirlari (x_min..x_max, y_min..y_max) referans yol + GRID_MARGIN'dan gelir
+(main.cpp bu varsayimla hizalanir - bkz. main.cpp ReadConfig).
 """
 import csv
 import json
@@ -23,8 +21,7 @@ import os
 import numpy as np
 
 from obstacles import load_obstacle_circles, obstacle_cost
-from roughness import load_roughness_zones, roughness_severity, terrain_height
-from scenario import OBSTACLES, ROUGHNESS
+from scenario import OBSTACLES
 
 
 def load_cfg(path="config.json"):
@@ -49,19 +46,6 @@ def grid_bounds(resolution, margin, ref_xs, ref_ys):
     return rows, cols, (x_min, x_max, y_min, y_max)
 
 
-def build_roughness_grids(zones, resolution, rows, cols, bounds):
-    x_min, _, y_min, _ = bounds
-    severity = np.zeros((rows, cols), dtype=float)
-    elevation = np.zeros((rows, cols), dtype=float)
-    for r in range(rows):
-        wy = y_min + (r + 0.5) * resolution
-        for c in range(cols):
-            wx = x_min + (c + 0.5) * resolution
-            severity[r, c] = roughness_severity(wx, wy, zones)
-            elevation[r, c] = terrain_height(wx, wy, zones)
-    return severity, elevation
-
-
 def build_obstacle_grid(circles, influence_radius, cbf_weight, decay_rate,
                         resolution, rows, cols, bounds):
     x_min, _, y_min, _ = bounds
@@ -80,8 +64,7 @@ def save_grid(grid, filepath):
     np.savetxt(filepath, grid, fmt="%.5f", delimiter=",")
 
 
-def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, cmap="Reds",
-                 circles=None, zones=None):
+def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, circles=None):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -94,19 +77,13 @@ def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, cmap="Reds",
     x_min, x_max, y_min, y_max = bounds
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(grid, origin="lower", extent=[x_min, x_max, y_min, y_max],
-                   cmap=cmap, interpolation="bilinear", aspect="equal")
+                   cmap="magma", interpolation="bilinear", aspect="equal")
     ax.plot(ref_xs, ref_ys, "b--", linewidth=1.6, label="Referans yol")
     ax.plot(0, 0, "g^", markersize=11, label="Baslangic")
     if circles:
         for (cx, cy, r) in circles:
             ax.add_patch(patches.Circle((cx, cy), r, fill=False,
                                         edgecolor="black", linewidth=1.4))
-    if zones:
-        for (cx, cy, R, amp, wl) in zones:
-            ax.add_patch(patches.Circle((cx, cy), R, fill=False,
-                                        edgecolor="black", linewidth=1.4, linestyle="--"))
-            ax.annotate(f"amp={amp} wl={wl}", (cx, cy), textcoords="offset points",
-                        xytext=(6, 6), fontsize=8, fontweight="bold")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.set_xlabel("X [m]"); ax.set_ylabel("Y [m]"); ax.set_title(title)
     ax.legend(loc="upper left", fontsize=8)
@@ -118,7 +95,7 @@ def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, cmap="Reds",
 
 def main():
     print("=" * 60)
-    print("  COSTMAP GENERATOR (engel + engebe)")
+    print("  OBSTACLE COSTMAP GENERATOR")
     print("=" * 60)
     cfg = load_cfg()
     resolution = cfg["GRID_RESOLUTION"]
@@ -126,22 +103,6 @@ def main():
     ref_xs, ref_ys = load_ref_path(cfg["REF_PATH_FILE"])
     rows, cols, bounds = grid_bounds(resolution, margin, ref_xs, ref_ys)
     print(f"Grid: {rows}x{cols} @ {resolution} m/hucre, margin {margin} m")
-
-    # --- Engebe (roughness) costmap ---
-    zones = load_roughness_zones(ROUGHNESS)
-    print(f"\nEngebe bolgesi sayisi: {len(zones)}")
-    for z in zones:
-        print(f"  merkez=({z[0]},{z[1]}) R={z[2]} amp={z[3]} wl={z[4]}")
-    severity, elevation = build_roughness_grids(zones, resolution, rows, cols, bounds)
-    roughness_file = cfg.get("ROUGHNESS_FILE", "data/roughness_costmap.csv")
-    save_grid(severity, roughness_file)
-    print(f"[OK] Roughness costmap: {roughness_file} "
-          f"(siddet {severity.min():.4f}..{severity.max():.4f}, "
-          f"yukseklik {elevation.min():+.3f}..{elevation.max():+.3f} m)")
-    save_preview(severity, ref_xs, ref_ys, bounds,
-                "Engebe (roughness) YUMUSAK maliyet",
-                roughness_file.replace(".csv", "_preview.png"),
-                cmap="Reds", zones=zones)
 
     # --- Engel (obstacle) costmap ---
     circles = load_obstacle_circles(OBSTACLES)
@@ -161,9 +122,9 @@ def main():
     print(f"[OK] Obstacle costmap: {obstacle_costmap_file} "
           f"(maliyet {obs_grid.min():.4f}..{min(obs_grid.max(), 1e6):.4f})")
     save_preview(obs_grid, ref_xs, ref_ys, bounds,
-                "Engel (obstacle) EK maliyet (CBF'ye ek, onun yerine degil)",
-                obstacle_costmap_file.replace(".csv", "_preview.png"),
-                cmap="magma", circles=circles)
+                 "Engel (obstacle) EK maliyet (CBF'ye ek, onun yerine degil)",
+                 obstacle_costmap_file.replace(".csv", "_preview.png"),
+                 circles=circles)
 
     # --- Ham engel listesi (C++ CBF + BeamNG fiziksel spawn icin) ---
     obstacles_file = cfg.get("OBSTACLES_FILE", "data/obstacles.json")

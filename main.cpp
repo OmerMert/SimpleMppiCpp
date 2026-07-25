@@ -38,15 +38,11 @@ std::vector<Obstacle> config_obstacles;
 
 std::string ref_path_filepath;
 
-// Costmap grids (both share ONE grid: reference-path extent +/- GRID_MARGIN, at
-// GRID_RESOLUTION metres per cell). Grid bounds must match generate_costmaps.py exactly.
+// Obstacle costmap grid: reference-path extent +/- GRID_MARGIN, at GRID_RESOLUTION
+// metres per cell. Bounds must match generate_costmaps.py exactly. This is an EXTRA
+// cost added on top of the analytic CBF (does not replace it); weight 0 disables it.
 double      grid_resolution;
 double      grid_margin;
-std::string roughness_filepath;
-double      roughness_cost_weight;
-
-// Obstacle costmap: EXTRA cost added on top of the analytic CBF above (does not
-// replace it). Weight 0 (default) disables the term entirely.
 std::string obstacle_costmap_filepath;
 double      obstacle_costmap_weight;
 
@@ -79,13 +75,9 @@ void ReadConfig() {
 
     ref_path_filepath = cfg["REF_PATH_FILE"];
 
-    // Optional: roughness map (absent / zero weight -> the roughness term is disabled)
-    grid_resolution       = cfg.value("GRID_RESOLUTION", 1.0);
-    grid_margin           = cfg.value("GRID_MARGIN", 10.0);
-    roughness_filepath    = cfg.value("ROUGHNESS_FILE", std::string(""));
-    roughness_cost_weight = cfg.value("ROUGHNESS_COST_WEIGHT", 0.0);
-
     // Obstacle costmap: additive EXTRA cost on top of the CBF below (weight 0 = off).
+    grid_resolution           = cfg.value("GRID_RESOLUTION", 1.0);
+    grid_margin               = cfg.value("GRID_MARGIN", 10.0);
     obstacle_costmap_filepath = cfg.value("OBSTACLE_COSTMAP_FILE", std::string(""));
     obstacle_costmap_weight   = cfg.value("OBSTACLE_COSTMAP_WEIGHT", 0.0);
 
@@ -164,10 +156,10 @@ MatrixXd loadRefPath(const std::string& filepath) {
 }
 
 
-// Load the roughness grid CSV (row-major floats, no header) from generate_roughness.py.
+// Load a costmap grid CSV (row-major floats, no header) from generate_costmaps.py.
 // Returns false if the file is missing or ragged.
-bool loadRoughnessGrid(const std::string& filepath, std::vector<float>& out,
-                       int& rows, int& cols) {
+bool loadGrid(const std::string& filepath, std::vector<float>& out,
+              int& rows, int& cols) {
     std::ifstream file(filepath);
     if (!file.is_open()) return false;
 
@@ -304,32 +296,12 @@ int main(int argc, char* argv[]) {
         config_obstacles, influence_radius, cbf_weight, decay_rate
     );
 
-    // --- Terrain roughness (offroad): SOFT cost, same source as the BeamNG terrain ---
-    if (!roughness_filepath.empty() && roughness_cost_weight > 0.0) {
-        std::vector<float> rough;
-        int r_rows = 0, r_cols = 0;
-        if (loadRoughnessGrid(roughness_filepath, rough, r_rows, r_cols)) {
-            // Bounds convention must match generate_roughness.py exactly.
-            float x_min = (float)(ref_path.col(0).minCoeff() - grid_margin);
-            float y_min = (float)(ref_path.col(1).minCoeff() - grid_margin);
-            mppi.set_roughness_map(rough, r_rows, r_cols, (float)grid_resolution,
-                                   x_min, y_min, (float)roughness_cost_weight);
-            std::cout << "[INFO] Roughness map: " << roughness_filepath
-                      << "  (" << r_rows << "x" << r_cols
-                      << ", origin " << x_min << "," << y_min
-                      << ", weight " << roughness_cost_weight << ")" << std::endl;
-        } else {
-            std::cerr << "[WARN] Roughness map unreadable: " << roughness_filepath
-                      << " - continuing WITHOUT the roughness cost." << std::endl;
-        }
-    }
-
     // --- Obstacle costmap: EXTRA cost on top of the CBF (does not replace it) ---
     if (!obstacle_costmap_filepath.empty() && obstacle_costmap_weight > 0.0) {
         std::vector<float> obs_grid;
         int o_rows = 0, o_cols = 0;
-        if (loadRoughnessGrid(obstacle_costmap_filepath, obs_grid, o_rows, o_cols)) {
-            // Same grid bounds convention as the roughness map (shared GRID_* settings).
+        if (loadGrid(obstacle_costmap_filepath, obs_grid, o_rows, o_cols)) {
+            // Grid bounds convention must match generate_costmaps.py exactly.
             float x_min = (float)(ref_path.col(0).minCoeff() - grid_margin);
             float y_min = (float)(ref_path.col(1).minCoeff() - grid_margin);
             mppi.set_obstacle_costmap(obs_grid, o_rows, o_cols, (float)grid_resolution,

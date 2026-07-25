@@ -2,7 +2,7 @@
     "_README": {
         "_about": "Single source of truth for the C++/CUDA MPPI controller, the BeamNG bridge and the map generators. JSON has no comment syntax, so the documentation lives in this block (same convention as _calibration_info). Everything is read at process start: editing a value only needs a restart, EXCEPT the items listed under _needs_rebuild.",
         "_needs_rebuild": "Vehicle footprint used by the CBF (vehicle_width 1.9, vehicle_length 4.5, safety_margin_rate 1.0) is NOT in this file - it lives in MPPIController.h and requires 'cmake --build build --config Debug'.",
-        "_after_editing": "Obstacle and roughness placement moved OUT of this file into scenario.py (OBSTACLES, ROUGHNESS). After editing scenario.py, re-run generate_costmaps.py: it rebuilds OBSTACLES_FILE, OBSTACLE_COSTMAP_FILE and ROUGHNESS_FILE (and the previews) from the ONE scenario.py source. beamng_bridge.py imports scenario.py directly for physical spawn/terrain, so it always agrees with what generate_costmaps.py just rasterized.",
+        "_after_editing": "Obstacle placement moved OUT of this file into scenario.py (OBSTACLES). After editing scenario.py, re-run generate_costmaps.py: it rebuilds OBSTACLES_FILE and OBSTACLE_COSTMAP_FILE (and the preview) from the ONE scenario.py source. beamng_bridge.py imports scenario.py directly for the physical spawn, so it always agrees with what generate_costmaps.py just rasterized.",
         "delta_t": "Control period [s]. MUST match the BeamNG tick rate; the bridge runs deterministic 20 Hz, so 0.05.",
         "wheel_base": "Effective wheelbase L [m] of the kinematic bicycle model. This is a SYSTEM-ID fit (see _calibration_info), NOT the physical etk800 wheelbase (~2.82 m). Only the yaw gain G = (v/L)*tan(steer) is identifiable; L alone is a gauge.",
         "max_steer_abs": "Steering command limit [rad]. Also used by the bridge as the full-lock scale: BeamNG steering = -steer_rad / max_steer_abs.",
@@ -13,7 +13,7 @@
         "param_lambda": "MPPI temperature. Lower = greedier (weights concentrate on the best samples).",
         "param_alpha": "Feeds the control cost: gamma = param_lambda * (1 - param_alpha).",
         "sigma": "Sampling noise covariance [[steer, 0], [0, accel]]. Lowering the steer term (0.075 -> 0.05) removed the steering weave at the source; do not raise it to force obstacle avoidance.",
-        "stage_cost_weight": "Per-step tracking weights [x, y, yaw, v]. The strong x/y weight is why a lateral detour never pays off (see ROUGHNESS_COST_WEIGHT).",
+        "stage_cost_weight": "Per-step tracking weights [x, y, yaw, v]. The strong x/y weight keeps the car on the reference path.",
         "terminal_cost_weight": "Same weights applied once at the end of the horizon.",
         "OBSTACLES_FILE": "HARD obstacles, written by generate_costmaps.py from scenario.py OBSTACLES ([x, y, r] circle, or [x, y, w, h] rectangle converted to its circumscribing circle). The C++ CBF avoids exactly these circles AND the bridge spawns them physically in BeamNG - both read this file, neither reads scenario.py's raw Python list directly (bridge.py is the one exception: it imports scenario.py directly since it's already Python).",
         "CBF_PARAMETERS": "Control Barrier Function (obstacles), used by BOTH the exact analytic CBF in mppi_core.cu (footprint+yaw aware - the actual collision avoidance) and generate_costmaps.py's obstacle costmap (a point-approximation preview/supplementary layer, see OBSTACLE_COSTMAP_WEIGHT - it does NOT replace the analytic CBF). influence_radius: distance [m] from the obstacle SURFACE where the soft barrier starts - in practice the clearance the car keeps. cbf_weight: barrier strength. decay_rate: cost = cbf_weight * exp(-decay_rate * h). Inside the obstacle the cost is 1e9 (collision) in the CBF / 1e6 in the costmap.",
@@ -21,11 +21,8 @@
         "OBSTACLE_COSTMAP_WEIGHT": "Weight of the additive obstacle-costmap term (stage_cost += weight * obstacle_costmap(x,y)). 0 (default) disables it - the analytic CBF alone still does all the avoidance, exactly as before this feature was added. Raise cautiously; do NOT touch this to 'fix' avoidance instead of the CBF/tracking params (see Log/08, Log/09 - tuning tracking params to fight obstacles previously broke smooth-path tracking).",
         "OBSTACLE_COSTMAP_INFLUENCE_RADIUS": "Influence radius [m] used ONLY when generate_costmaps.py rasterizes the obstacle costmap - independent from CBF_PARAMETERS.influence_radius (which stays tight/exact for the analytic CBF). Needs to be a few grid cells wide (>= GRID_RESOLUTION) or the soft falloff band is thinner than one cell and the costmap is effectively invisible.",
         "REF_PATH_FILE": "Reference path CSV with columns x, y, yaw, v (yaw is normalised to [-pi, pi] on load).",
-        "GRID_RESOLUTION": "Costmap grid cell size [m], shared by both the roughness and the obstacle costmap. The C++ side and generate_costmaps.py MUST agree or the maps are misaligned.",
-        "GRID_MARGIN": "Margin [m] added around the reference-path extent to size both costmap grids. Same agreement requirement as GRID_RESOLUTION.",
-        "ROUGHNESS_COST_WEIGHT": "Weight of the VELOCITY-CONDITIONED roughness cost: stage_cost += weight * roughness(x,y) * v^2. The v^2 factor makes the car SLOW DOWN on rough ground instead of steering around it (a lateral detour can never beat the x/y tracking weight). Tune from v_rough ~= v_ref * w_v / (w_v + weight * roughness). 0 disables the term.",
-        "ROUGHNESS_FILE": "Roughness cost grid written by generate_costmaps.py (from scenario.py ROUGHNESS) and read by the C++ side.",
-        "TERRAIN": "Physical BeamNG terrain built from scenario.py ROUGHNESS (bridge.py imports it directly). size: heightmap grid size (the importer rounds UP to a power of two, so 256 gives a 256x256 map). resolution: metres per pixel; the terrain spans +/-(size*resolution)/2 around the origin. z_max: elevation clamp [m]. material: BeamNG terrain material - tech_ground provides Dirt, Mud, gravel, Rock, BeachSand, Asphalt, Concrete, snow (BeamNG's generator defaults to Grass; the bridge swaps the fully-covered layer to this one)."
+        "GRID_RESOLUTION": "Obstacle-costmap grid cell size [m]. The C++ side and generate_costmaps.py MUST agree or the map is misaligned.",
+        "GRID_MARGIN": "Margin [m] added around the reference-path extent to size the obstacle costmap grid. Same agreement requirement as GRID_RESOLUTION."
     },
     "delta_t": 0.05,
     "wheel_base": 1.5,
@@ -70,14 +67,6 @@
     "REF_PATH_FILE": "data/ovalpath.csv",
     "GRID_RESOLUTION": 1.0,
     "GRID_MARGIN": 10.0,
-    "ROUGHNESS_COST_WEIGHT": 40.0,
-    "ROUGHNESS_FILE": "data/roughness_costmap.csv",
-    "TERRAIN": {
-        "size": 256,
-        "resolution": 1.0,
-        "z_max": 1.0,
-        "material": "Dirt"
-    },
     "_calibration_info": {
         "source": "beamng_sysid.py + linear-region refit",
         "vehicle": "etk800",

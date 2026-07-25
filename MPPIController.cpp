@@ -103,8 +103,6 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         (float)max_steer, (float)max_accel, (float)L,
         (float)vehicle_width, (float)vehicle_length, (float)safety_margin_rate,
         influence_radius, cbf_weight, decay_rate,
-        roughness_data.empty() ? nullptr : roughness_data.data(),
-        rough_rows, rough_cols, rough_res, rough_x_min, rough_y_min, roughness_weight,
         obstacle_costmap_data.empty() ? nullptr : obstacle_costmap_data.data(),
         obs_rows, obs_cols, obs_res, obs_x_min, obs_y_min, obstacle_costmap_weight
     );
@@ -238,23 +236,6 @@ VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
         w = exp_term / eta;
     }
     return w;
-}
-
-void MPPIController::set_roughness_map(const std::vector<float>& data, int rows, int cols,
-                                       float resolution, float x_min, float y_min, float weight) {
-    if ((int)data.size() != rows * cols || rows <= 0 || cols <= 0 || weight <= 0.0f) {
-        roughness_data.clear();
-        rough_rows = rough_cols = 0;
-        roughness_weight = 0.0f;
-        return;
-    }
-    roughness_data   = data;
-    rough_rows       = rows;
-    rough_cols       = cols;
-    rough_res        = resolution;
-    rough_x_min      = x_min;
-    rough_y_min      = y_min;
-    roughness_weight = weight;
 }
 
 void MPPIController::set_obstacle_costmap(const std::vector<float>& data, int rows, int cols,
