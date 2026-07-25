@@ -17,9 +17,7 @@ include_directories(include)
 # Add source files
 add_executable(MppiCpp
     main.cpp
-    Vehicle.cpp
-    MppiController.cpp
-    CostMapGenerator.cpp
+    MPPIController.cpp
     UDP.cpp
     mppi_core.cu
 )

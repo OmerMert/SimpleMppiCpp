@@ -35,12 +35,6 @@ bool setupUDPSender(SOCKET& outSocket, sockaddr_in& outDestAddr,
     return true;
 }
 
-void sendUDPData(SOCKET sock, const sockaddr_in& destAddr,
-                 const SimDataPacket& packet) {
-    sendto(sock, (const char*)&packet, sizeof(SimDataPacket), 0,
-           (SOCKADDR*)&destAddr, sizeof(destAddr));
-}
-
 void sendControlPacket(SOCKET sock, const sockaddr_in& destAddr,
                        const ControlPacket& pkt) {
     sendto(sock, (const char*)&pkt, sizeof(ControlPacket), 0,
@@ -81,31 +75,6 @@ bool receiveStatePacket(SOCKET sock, StatePacket& outPkt, int timeout_ms) {
     }
 
     return true;
-}
-
-void sendTrainResponse(SOCKET sock, const sockaddr_in& destAddr,
-                       const std::vector<float>& costmap,
-                       int rows, int cols,
-                       float resolution, float x_min, float y_min,
-                       float reward) {
-    size_t header_size = sizeof(int) * 2 + sizeof(float) * 4;
-    size_t map_size = costmap.size() * sizeof(float);
-    size_t total_size = header_size + map_size;
- 
-    std::vector<char> buffer(total_size);
-    char* ptr = buffer.data();
- 
-    memcpy(ptr, &rows, sizeof(int));          ptr += sizeof(int);
-    memcpy(ptr, &cols, sizeof(int));          ptr += sizeof(int);
-    memcpy(ptr, &resolution, sizeof(float));  ptr += sizeof(float);
-    memcpy(ptr, &x_min, sizeof(float));       ptr += sizeof(float);
-    memcpy(ptr, &y_min, sizeof(float));       ptr += sizeof(float);
-    memcpy(ptr, &reward, sizeof(float));      ptr += sizeof(float);
- 
-    memcpy(ptr, costmap.data(), map_size);
- 
-    sendto(sock, buffer.data(), (int)total_size, 0,
-           (SOCKADDR*)&destAddr, sizeof(destAddr));
 }
 
 void cleanupUDPSender(SOCKET sock) {

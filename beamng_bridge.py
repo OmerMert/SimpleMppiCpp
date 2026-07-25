@@ -26,9 +26,14 @@ import subprocess
 import time
 import csv
 import json
+import importlib.util
 
+import beamngpy
 from beamngpy import BeamNGpy, Scenario, Vehicle, ProceduralCylinder, ProceduralCube
 from beamngpy.sensors import Electrics
+
+from roughness import load_roughness_zones, terrain_height
+from scenario import OBSTACLES, ROUGHNESS
 
 # ============ USER SETTINGS ============
 BNG_HOME = r"D:\BeamNG.tech.v0.38.5.0"   # folder containing tech.key
@@ -47,10 +52,15 @@ with open("config.json", 'r') as f:
 # --- PATH SELECTION ---
 PATH_CSV = data["REF_PATH_FILE"]
 
-# Obstacles: SAME list the costmap is built from (config.json "OBSTACLES").
-# MPPI-frame: [x, y, r] circle or [x, y, w, h] rectangle. Spawned physically in
-# BeamNG so MPPI (avoids via costmap) and the real car (collides) share one source.
-OBSTACLES = data.get("OBSTACLES", [])
+# Obstacles: SAME source the C++ CBF and the obstacle costmap are built from
+# (scenario.py OBSTACLES, imported above). MPPI-frame: [x, y, r] circle or
+# [x, y, w, h] rectangle. Spawned physically here so MPPI (avoids via CBF) and
+# the real car (collides) share one source.
+
+# Engebe (offroad) bolgeleri - roughness.py ile AYNI kaynak (scenario.py ROUGHNESS).
+# MPPI-frame [x, y, radius, amplitude, wavelength]. Fiziksel zemin import_heightmap ile.
+ROUGHNESS_ZONES = load_roughness_zones(ROUGHNESS)
+TERRAIN_CFG = data.get("TERRAIN", {})
 
 # Effective steering angle [rad] at full lock (steering=1.0) for the BeamNG etk800.
 MAX_STEER_RAD = data["max_steer_abs"]  # rad 
@@ -150,6 +160,104 @@ def full_stop(vehicle, bng, ticks=40):
         bng.control.step(1, wait=True)
     # latch parked: neutral + parking brake, brake released
     vehicle.control(throttle=0.0, brake=0.0, steering=0.0, parkingbrake=1.0, gear=0)
+
+
+# ======================================================================
+# ENGEBE (OFFROAD) ZEMINI  -  config ROUGHNESS -> BeamNG heightmap
+# ======================================================================
+def _load_terrain_importer():
+    """Terrain_Importer'i IZOLE yukle (beamngpy.tools/__init__ fastapi cekiyor)."""
+    p = os.path.join(os.path.dirname(beamngpy.__file__), "tools", "terrain_import.py")
+    spec = importlib.util.spec_from_file_location("bng_terrain_import", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.Terrain_Importer
+
+
+def _bounding_square(s):
+    """Lua findBoundingSquare ile ayni: s'den buyuk en kucuk 2'nin kuvveti."""
+    t = 64
+    for _ in range(20):
+        t *= 2
+        if t > s:
+            return t
+    return None
+
+
+def import_roughness_terrain(bng, vehicle, zones, terrain_cfg, world_to_mppi,
+                             spawn_pos, spawn_quat):
+    """Engebe bolgelerinden (MPPI-frame) BeamNG FIZIKSEL zemini uretir.
+
+    Heightmap her pikseli dunya -> MPPI donusumuyle (bridge'in KENDI world_to_mppi
+    transformu) hizalanir, sonra terrain_height ile yukseklik hesaplanir. Boylece
+    engebe, config'deki MPPI konumlarina denk gelir (araca uygulanan surusle ayni frame).
+
+    EK/opsiyonel: calisan kontrol dongusune dokunmaz; hata olursa cagiran taraf
+    duz zeminle devam eder.
+    """
+    size = int(terrain_cfg.get("size", 256))
+    scale = float(terrain_cfg.get("resolution", 1.0))
+    zclamp = float(terrain_cfg.get("z_max", 1.0))
+    N = size - 1                         # data 255 -> Lua bmp 256'ya yuvarlar
+    bmp = _bounding_square(N)
+    half = 0.5 * bmp * scale             # terrain kapsam [-half, half]
+
+    data = {}
+    zmin, zmax = 1e9, -1e9
+    for i in range(N):
+        wx = -half + i * scale
+        row = {}
+        for j in range(N):
+            wy = -half + j * scale
+            mx, my, _ = world_to_mppi(wx, wy, 0.0)
+            h = terrain_height(mx, my, zones)
+            h = max(-zclamp, min(zclamp, h))
+            row[j] = h
+            if h < zmin:
+                zmin = h
+            if h > zmax:
+                zmax = h
+        data[i] = row
+
+    if zmax - zmin < 1e-6:
+        print("[Bridge] Engebe alani duz (bolge yok?) - terrain import atlandi.")
+        return False
+
+    TI = _load_terrain_importer()
+    print(f"[Bridge] Engebe heightmap import ediliyor ({N}x{N}, relief {zmax - zmin:.2f} m)...")
+    TI.import_heightmap(bng, data, N, N, scale=scale, zMin=zmin, zMax=zmax, isYFlipped=True)
+    bng.control.queue_lua_command(
+        "if core_terrain.getTerrain() then "
+        f"core_terrain.getTerrain():setPosition(vec3({-half},{-half},0)); "
+        "be:reloadCollision() end")
+    print(f"[Bridge] Engebe zemin yuklendi + origin'e ortalandi (kapsam +-{half:.0f} m).")
+
+    # --- Zemin malzemesi (offroad icin toprak) ---
+    # BeamNG'nin terrainGenerator'i (terrainGenerator.lua:48) defaultMaterial='Grass'
+    # olarak SABIT tutuyor: o materyale tam-kaplama (beyaz) layer-map, digerlerine
+    # siyah uretiyor -> uretilen zemin hep CIM oluyor. Oyun dosyasini degistirmeden,
+    # tam-kapli katmanin materyalini runtime'da takas ediyoruz (createTerrain'in
+    # kendi kullandigi terrain:updateMaterial API'si). tech_ground'da mevcut
+    # materyaller: Dirt, Mud, gravel, Rock, BeachSand, Asphalt, Concrete, snow.
+    material = terrain_cfg.get("material")
+    if material and material != "Grass":
+        bng.control.queue_lua_command(
+            "local t = core_terrain.getTerrain(); "
+            "if t then local ms = t:getMaterials(); "
+            "for i = 1, #ms do "
+            f"if ms[i]:getInternalName() == 'Grass' then t:updateMaterial(i-1, '{material}') end "
+            "end end")
+        print(f"[Bridge] Zemin malzemesi -> {material} (Grass katmani takas edildi).")
+
+    # araci yeni zemine oturt (MPPI 2B oldugu icin z tracking'i etkilemez)
+    for _ in range(10):
+        bng.control.step(1, wait=True)
+    vehicle.teleport(pos=(spawn_pos[0], spawn_pos[1], spawn_pos[2] + zmax + 1.0),
+                     rot_quat=spawn_quat, reset=True)
+    for _ in range(30):
+        vehicle.control(throttle=0.0, brake=0.0, steering=0.0)
+        bng.control.step(1, wait=True)
+    return True
 
 
 def main():
@@ -356,6 +464,18 @@ def main():
             print("[Bridge] WARNING: Vehicle is not at the zero point after teleport!")
             print("[Bridge] Continuing anyway (MPPI will use the real state)")
 
+        # --- Engebe (offroad) zemini yukle (EK - kontrol dongusune dokunmaz) ---
+        # Hata olursa DUZ zeminle devam; tracking etkilenmez.
+        if ROUGHNESS_ZONES:
+            try:
+                import_roughness_terrain(
+                    bng, vehicle, ROUGHNESS_ZONES, TERRAIN_CFG, world_to_mppi,
+                    (x0_world, y0_world, 0.5), (qx, qy, qz, qw))
+            except Exception as e:
+                print(f"[Bridge] Engebe zemin yuklenemedi ({e}); DUZ zeminle devam.")
+                import traceback
+                traceback.print_exc()
+
         # --- Is the C++ MPPI exe still running? ---
         if mppi_proc.poll() is not None:
             print(f"[Bridge] ERROR: MPPI exe exited unexpectedly "
@@ -374,7 +494,7 @@ def main():
         # --- Per-step trajectory log (diagnostics only; no effect on driving) ---
         run_log = open("run_log.csv", "w", newline="")
         run_log.write("step,t,mx,my,myaw_deg,v,min_dist,ref_x,ref_y,"
-                      "steer_rad,accel_cmd,throttle,brake\n")
+                      "steer_rad,accel_cmd,throttle,brake,z,vz\n")
 
         timeout_count = 0     # consecutive C++ command timeouts
         last_draw_idx = 0     # last trajectory index drawn live in BeamNG
@@ -382,8 +502,8 @@ def main():
         while True:
             vehicle.sensors.poll()
             s = vehicle.sensors["state"]
-            px_w, py_w, _ = s["pos"]
-            vx, vy, _ = s["vel"]
+            px_w, py_w, pz_w = s["pos"]
+            vx, vy, vz_w = s["vel"]
             qx, qy, qz, qw = s["rotation"]
             yaw_w = quat_to_yaw(qx, qy, qz, qw)
 
@@ -510,7 +630,7 @@ def main():
             run_log.write(f"{step_count},{time.time()-t_start:.3f},{mx:.3f},{my:.3f},"
                           f"{math.degrees(myaw):.2f},{v:.3f},{min_dist:.3f},"
                           f"{ref_x:.3f},{ref_y:.3f},{steer_rad:.4f},{accel_cmd:.4f},"
-                          f"{throttle:.3f},{brake:.3f}\n")
+                          f"{throttle:.3f},{brake:.3f},{pz_w:.3f},{vz_w:.3f}\n")
             run_log.flush()
 
             bng.control.step(1, wait=True)

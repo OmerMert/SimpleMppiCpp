@@ -41,7 +41,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
 
     // get the waypoint closest to current vehicle position 
     _get_nearest_waypoint(x0[0], x0[1], true);
-    if (prev_waypoints_idx >= ref_path.rows() - 4) {
+    if (prev_waypoints_idx >= ref_path.rows()) {
         std::cerr << "[Finish] End of the reference path." << std::endl;
         throw std::out_of_range("End of the reference path.");
     }
@@ -102,7 +102,11 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         param_gamma, inv_sigma_steer, inv_sigma_accel,
         (float)max_steer, (float)max_accel, (float)L,
         (float)vehicle_width, (float)vehicle_length, (float)safety_margin_rate,
-        influence_radius, cbf_weight, decay_rate
+        influence_radius, cbf_weight, decay_rate,
+        roughness_data.empty() ? nullptr : roughness_data.data(),
+        rough_rows, rough_cols, rough_res, rough_x_min, rough_y_min, roughness_weight,
+        obstacle_costmap_data.empty() ? nullptr : obstacle_costmap_data.data(),
+        obs_rows, obs_cols, obs_res, obs_x_min, obs_y_min, obstacle_costmap_weight
     );
 
     // Fill the cost vector from GPU output
@@ -164,45 +168,6 @@ Control MPPIController::_g(const Control& v) const {
     v_clamped[0] = std::clamp(v[0], -max_steer, max_steer);
     v_clamped[1] = std::clamp(v[1], -max_accel, max_accel);
     return v_clamped;
-}
-
-double MPPIController::normalize_angle(double angle) const {
-    return std::fmod(angle + 2.0 * M_PI , 2.0 * M_PI);
-}
-
-double MPPIController::_c(const State& x_t) {
-    Vector4d ref = _get_nearest_waypoint(x_t[0], x_t[1]);
-    
-    double ref_x = ref[0], ref_y = ref[1], ref_yaw = ref[2], ref_v = ref[3];
-    
-    State x_normalized = x_t;
-    x_normalized[2] = normalize_angle(x_t[2]);
-
-    double cost = stage_cost_weight[0] * std::pow(x_normalized[0] - ref_x, 2) +
-                  stage_cost_weight[1] * std::pow(x_normalized[1] - ref_y, 2) +
-                  stage_cost_weight[2] * std::pow(x_normalized[2] - ref_yaw, 2) +
-                  stage_cost_weight[3] * std::pow(x_normalized[3] - ref_v, 2);
-
-    cost += _is_collided(x_t) * 1.0e10;
-
-    return cost;
-}
-
-double MPPIController::_phi(const State& x_T) {
-    Vector4d ref = _get_nearest_waypoint(x_T[0], x_T[1]);
-    double ref_x = ref[0], ref_y = ref[1], ref_yaw = ref[2], ref_v = ref[3];
-    
-    State x_normalized = x_T;
-    x_normalized[2] = normalize_angle(x_T[2]);
-    
-    double cost = terminal_cost_weight[0] * std::pow(x_normalized[0] - ref_x, 2) +
-                  terminal_cost_weight[1] * std::pow(x_normalized[1] - ref_y, 2) +
-                  terminal_cost_weight[2] * std::pow(x_normalized[2] - ref_yaw, 2) +
-                  terminal_cost_weight[3] * std::pow(x_normalized[3] - ref_v, 2);
-
-    cost += _is_collided(x_T) * 1.0e10;
-
-    return cost;
 }
 
 // Finds the nearest waypoint on the reference path.
@@ -275,6 +240,40 @@ VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
     return w;
 }
 
+void MPPIController::set_roughness_map(const std::vector<float>& data, int rows, int cols,
+                                       float resolution, float x_min, float y_min, float weight) {
+    if ((int)data.size() != rows * cols || rows <= 0 || cols <= 0 || weight <= 0.0f) {
+        roughness_data.clear();
+        rough_rows = rough_cols = 0;
+        roughness_weight = 0.0f;
+        return;
+    }
+    roughness_data   = data;
+    rough_rows       = rows;
+    rough_cols       = cols;
+    rough_res        = resolution;
+    rough_x_min      = x_min;
+    rough_y_min      = y_min;
+    roughness_weight = weight;
+}
+
+void MPPIController::set_obstacle_costmap(const std::vector<float>& data, int rows, int cols,
+                                          float resolution, float x_min, float y_min, float weight) {
+    if ((int)data.size() != rows * cols || rows <= 0 || cols <= 0 || weight <= 0.0f) {
+        obstacle_costmap_data.clear();
+        obs_rows = obs_cols = 0;
+        obstacle_costmap_weight = 0.0f;
+        return;
+    }
+    obstacle_costmap_data  = data;
+    obs_rows               = rows;
+    obs_cols               = cols;
+    obs_res                = resolution;
+    obs_x_min              = x_min;
+    obs_y_min              = y_min;
+    obstacle_costmap_weight = weight;
+}
+
 MatrixXd MPPIController::_moving_average_filter(const MatrixXd& xx, int window_size) const {
     
     MatrixXd xx_mean = MatrixXd::Zero(xx.rows(), xx.cols());
@@ -298,52 +297,3 @@ MatrixXd MPPIController::_moving_average_filter(const MatrixXd& xx, int window_s
     return xx_mean;
 }
 
-double MPPIController::_is_collided(const State& x_t) {
-
-    // vehicle shape parameters
-    double vw = vehicle_width * safety_margin_rate;
-    double vl = vehicle_length * safety_margin_rate;
-
-    // get current states
-    double x = x_t[0];
-    double y = x_t[1];
-    double yaw = x_t[2];
-
-    // key points for collision check
-    std::vector<Eigen::Vector2d> local_points = {
-        {-0.5 * vl, -0.5 * vw}, {-0.5 * vl, 0.0}, {-0.5 * vl, +0.5 * vw}, 
-        { 0.0,      +0.5 * vw}, { 0.0,     -0.5 * vw}, { 0.0, 0.0},       
-        {+0.5 * vl, +0.5 * vw}, {+0.5 * vl, 0.0}, {+0.5 * vl, -0.5 * vw}  
-    };
-
-
-    // check if the key points are inside the obstacles
-    for (const auto& obs : obstacles) {
-        double obs_r_sq = obs.r * obs.r; 
-
-        for (const auto& p : local_points) {
-            
-            double global_px = (p.x() * std::cos(yaw) - p.y() * std::sin(yaw)) + x;
-            double global_py = (p.x() * std::sin(yaw) + p.y() * std::cos(yaw)) + y;
-
-            double dist_sq = std::pow(global_px - obs.x, 2) + std::pow(global_py - obs.y, 2);
-
-            if (dist_sq < obs_r_sq) {
-                return 1.0; // collided
-            }
-        }
-    }
-
-    return 0.0; // not collided
-}
-
-void MPPIController::set_weights(double w_x, double w_y, double w_yaw, double w_v) {
-        stage_cost_weight << w_x, w_y, w_yaw, w_v;
-        terminal_cost_weight << w_x, w_y, w_yaw, w_v;
-}
-
-// --- Reset MPPI Internal State ---
-void MPPIController::reset() {
-    prev_waypoints_idx = 0; 
-    u_prev.setZero();       
-}

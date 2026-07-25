@@ -40,7 +40,11 @@ extern "C" void launch_mppi_gpu(
     float param_gamma, float inv_sigma_steer, float inv_sigma_accel,
         float max_steer, float max_accel, float wheelbase,
     float vehicle_w_param, float vehicle_l_param, float safety_margin,
-    float influence_radius_param, float cbf_weight_param, float decay_rate_param
+    float influence_radius_param, float cbf_weight_param, float decay_rate_param,
+    const float* h_roughness, int rough_rows, int rough_cols,
+    float rough_res, float rough_x_min, float rough_y_min, float roughness_weight,
+    const float* h_obstacle_costmap, int obs_rows, int obs_cols,
+    float obs_res, float obs_x_min, float obs_y_min, float obstacle_costmap_weight
 );
 
 class MPPIController {
@@ -66,12 +70,22 @@ public:
     );
 
     std::tuple<Control, MatrixXd> calc_control_input(const State& observed_x);
-    
+
     // Returns: [ref_x, ref_y, ref_yaw, ref_v]
     Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
-    double _is_collided(const State& x_t);
-    void set_weights(double w_x, double w_y, double w_yaw, double w_v);
-    void reset();
+
+    // Offroad: attach the terrain-roughness grid used as a SOFT cost in the rollouts.
+    // Grid is row-major (rows x cols); cell (r,c) center is at
+    // (x_min + (c+0.5)*resolution, y_min + (r+0.5)*resolution).
+    // Not calling this (or weight <= 0) simply disables the roughness term.
+    void set_roughness_map(const std::vector<float>& data, int rows, int cols,
+                           float resolution, float x_min, float y_min, float weight);
+
+    // Obstacle costmap: EXTRA soft cost added on top of the analytic CBF (does NOT
+    // replace it - the CBF footprint/collision logic in mppi_core.cu is untouched).
+    // Not calling this (or weight <= 0) simply disables the term.
+    void set_obstacle_costmap(const std::vector<float>& data, int rows, int cols,
+                              float resolution, float x_min, float y_min, float weight);
 private:
 
     int dim_x = 4; // dimension of system state vector
@@ -106,7 +120,19 @@ private:
     float influence_radius;
     float cbf_weight;
     float decay_rate;
-    
+
+    // Terrain roughness (offroad soft cost); empty/weight 0 -> term disabled
+    std::vector<float> roughness_data;
+    int   rough_rows = 0, rough_cols = 0;
+    float rough_res = 1.0f, rough_x_min = 0.0f, rough_y_min = 0.0f;
+    float roughness_weight = 0.0f;
+
+    // Obstacle costmap (EXTRA cost, additive to the CBF); empty/weight 0 -> disabled
+    std::vector<float> obstacle_costmap_data;
+    int   obs_rows = 0, obs_cols = 0;
+    float obs_res = 1.0f, obs_x_min = 0.0f, obs_y_min = 0.0f;
+    float obstacle_costmap_weight = 0.0f;
+
     // Reference path
     MatrixXd ref_path; // N x 4 [x, y, yaw, v]
     int prev_waypoints_idx = 0;
@@ -118,28 +144,20 @@ private:
     Matrix2d cholesky_L; 
     std::normal_distribution<double> std_normal_dist{0.0, 1.0};
 
-    // System dynamic
+    // System dynamics (kinematic bicycle) used to roll out the optimal trajectory
     State _F(const State& x_t, const Control& v_t) const;
 
-    // Control limitation
+    // Clamp a control input to the actuator limits
     Control _g(const Control& v) const;
 
-    // Stage cost
-    double _c(const State& x_t);
-
-    // Terminal cost
-    double _phi(const State& x_T);
-
-
+    // Draw the K x T noise samples ~ N(0, Sigma)
     MatrixXd _calc_epsilon();
 
+    // Information-theoretic sample weights from the rollout costs
     VectorXd _compute_weights(const VectorXd& S) const;
 
+    // Temporal smoothing of the control update
     MatrixXd _moving_average_filter(const MatrixXd& xx, int window_size) const;
-
-    double normalize_angle(double angle) const;
-
-
 };
 
 #endif // MPPI_CONTROLLER_H
