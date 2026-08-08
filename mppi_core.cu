@@ -1,8 +1,21 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define M_PI 3.14159265358979323846f
+
+// Kernel block size. 256 is the default; MPPI_BLOCK overrides it so the choice can be
+// swept without rebuilding (must be a multiple of the 32-thread warp).
+static int mppi_block_size() {
+    static int bs = -1;
+    if (bs < 0) {
+        const char* e = getenv("MPPI_BLOCK");
+        int v = e ? atoi(e) : 256;
+        bs = (v >= 32 && v <= 1024 && v % 32 == 0) ? v : 256;
+    }
+    return bs;
+}
 
 struct Obstacle {
     float x, y, r;
@@ -127,10 +140,13 @@ __device__ void get_nearest_waypoint_gpu(
     float min_dist_sq = 1e10f;
     int nearest = prev_idx;
     
-    // Bidirectional search: 50 backward, 200 forward
-    int SEARCH_BWD = 50;
+    // Forward-only search, same as the reference implementation (MizuhoAOKI
+    // _get_nearest_waypoint, SEARCH_IDX_LEN=200). An earlier 50-step backward window was
+    // dropped: measured over 2675 logged steps the nearest index NEVER moved backwards, so
+    // it only added ~25% search work per rollout step. (Re-add it if the car can travel
+    // backwards along the path - e.g. on slopes in the offroad branch.)
     int SEARCH_FWD = 200;
-    int start_idx = (prev_idx - SEARCH_BWD > 0) ? prev_idx - SEARCH_BWD : 0;
+    int start_idx = prev_idx > 0 ? prev_idx : 0;
     int end_idx = (prev_idx + SEARCH_FWD < path_size) ? prev_idx + SEARCH_FWD : path_size;
 
     for(int i = start_idx; i < end_idx; ++i) {
@@ -228,9 +244,10 @@ __global__ void mppi_rollout_kernel(
         // Stage Cost (_c): search while tracking waypoint index along the horizon
         float rx, ry, ryaw, rv;
         {
+            // Forward-only 200 (reference-identical); see note in get_nearest_waypoint_gpu.
             float min_d = 1e10f;
-            int SFWD = 200, SBWD = 50;
-            int si = (local_waypoint_idx - SBWD > 0) ? local_waypoint_idx - SBWD : 0;
+            int SFWD = 200;
+            int si = local_waypoint_idx > 0 ? local_waypoint_idx : 0;
             int ei = (local_waypoint_idx + SFWD < path_size) ? local_waypoint_idx + SFWD : path_size;
             for (int i = si; i < ei; ++i) {
                 float dx = x - ref_path[i*4+0];
@@ -345,7 +362,7 @@ extern "C" void launch_mppi_gpu(
         cudaMemcpy(d_obs_costmap, h_obstacle_costmap, obs_cells * sizeof(float), cudaMemcpyHostToDevice);
     }
 
-    int threadsPerBlock = 256;
+    int threadsPerBlock = mppi_block_size();
     int blocksPerGrid = (K + threadsPerBlock - 1) / threadsPerBlock;
     
     float final_w = vehicle_w_param * safety_margin;

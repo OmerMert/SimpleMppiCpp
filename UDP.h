@@ -14,11 +14,12 @@
 #pragma pack(push, 1)
 
 // C++ -> Python (control command sent to BeamNG)
-// Python struct format: "dddi" (3 doubles + 1 int32) = 28 bytes
+// Python struct format: "ddddi" (4 doubles + 1 int32) = 36 bytes
 struct ControlPacket {
     double time;
     double steer;        // radians, [-max_steer, +max_steer]
     double accel;        // m/s^2, negative = braking request
+    double solve_ms;     // MPPI calc_control_input compute time [ms] (benchmark metric)
     int32_t reset;       // 0 = continue, 1 = reset scenario
 };
 

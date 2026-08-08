@@ -20,6 +20,7 @@ Important conventions (identified from hello-world test):
 """
 import math
 import os
+import sys
 import socket
 import struct
 import subprocess
@@ -28,7 +29,6 @@ import csv
 import json
 
 from beamngpy import BeamNGpy, Scenario, Vehicle, ProceduralCylinder, ProceduralCube
-from beamngpy.sensors import Electrics
 
 from scenario import OBSTACLES
 
@@ -41,6 +41,52 @@ MPPI_EXE = "MppiCpp.exe"
 
 CPP_LISTEN_PORT = 5005
 PY_LISTEN_PORT  = 5006
+
+# All per-step run logs go here (one csv per controller/mode), keeping the project root clean.
+RUNS_DIR = "runs"
+
+# --- Controller under test (SWAPPABLE for the MPPI speed benchmark) ---
+# The harness (this bridge, BeamNG, path, obstacles, metrics) stays identical; only the
+# "brain" behind the UDP protocol changes, so the comparison is apples-to-apples.
+# Usage:  python beamng_bridge.py [controller] [mode]
+#
+# controller (arg 1, or MPPI_CONTROLLER env; default "cpp"):
+#   cpp    -> our C++/CUDA MPPI (MppiCpp.exe)
+#   python -> competitor python_simple_mppi (MizuhoAOKI)
+#   jax    -> competitor jax-mppi (jlehtomaa, Williams 2017)
+#   torch  -> competitor pytorch_mppi (UM-ARM-Lab, Williams 2017)
+CONTROLLER = (sys.argv[1] if len(sys.argv) > 1
+              else os.environ.get("MPPI_CONTROLLER", "cpp")).lower()
+
+# mode (arg 2, or MPPI_MODE env; default "step"):
+#   step     -> BENCHMARK mode. The sim is PAUSED while the controller thinks, then advanced
+#               exactly one tick (true 20 Hz) per control. Deterministic and independent of
+#               wall-clock speed, so a slow and a fast controller face IDENTICAL dynamics ->
+#               fair comparison. (Without it BeamNG free-runs during the solve: the car drifts
+#               ~v*t, a slow controller goes unstable, and a fast one ends up controlling at a
+#               lower, wall-clock-dependent rate - measured ~5 Hz for C++ vs 20 Hz for Python.)
+#   realtime -> DEMO mode. No pausing; the simulation runs at real time and the controller must
+#               keep up (needs solve < 50 ms). Shows whether a controller is genuinely
+#               real-time capable. NOT for fair benchmarking.
+MODE = (sys.argv[2] if len(sys.argv) > 2
+        else os.environ.get("MPPI_MODE", "step")).lower()
+if MODE not in ("step", "realtime"):
+    print(f"[Bridge] UYARI: bilinmeyen mod '{MODE}', 'step' kullanilacak.")
+    MODE = "step"
+PAUSE_DURING_SOLVE = (MODE == "step")
+
+# Live red-trajectory drawing costs an extra BeamNG round-trip every few steps. In realtime
+# the loop period is what limits the control rate, so drawing is OFF there by default; in
+# step mode it is free (sim is paused anyway) and useful to watch. Override: MPPI_DRAW=1/0.
+DRAW_TRAJECTORY = os.environ.get("MPPI_DRAW", "1" if MODE == "step" else "0") == "1"
+# Print a breakdown of where each loop iteration's wall-clock time goes (poll / control /
+# step / draw / controller). Set MPPI_PROFILE=0 to silence.
+PROFILE_LOOP = os.environ.get("MPPI_PROFILE", "1") == "1"
+
+# The pure-Python competitor is ~1000x slower per solve, so it needs a generous
+# control-reply timeout. JAX is fast (~12 ms) but its first call JIT-compiles (~0.6 s),
+# so give it some slack too. C++ is fast, so 5 s comfortably catches real hangs.
+RECV_TIMEOUT = {"python": 60.0, "jax": 30.0, "torch": 30.0}.get(CONTROLLER, 5.0)
 
 
 with open("config.json", 'r') as f:
@@ -118,19 +164,35 @@ def accel_to_throttle_brake(accel_cmd, v, _state=[0.0]):
         brake = min(-u, 1.0)
     return throttle, brake
 
-# Launches the C++ MPPI exe in "beamng" mode
+# Launches the selected controller (C++ exe or the Python competitor). Both speak the
+# SAME UDP protocol, so the rest of the harness does not change.
 def launch_mppi(cpp_listen_port, py_send_port):
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    exe_path = os.path.join(script_dir, MPPI_EXE)
-    if not os.path.isfile(exe_path):
-        print(f"[Bridge] ERROR: MPPI exe not found: {exe_path}")
-        print("[Bridge] Build the C++ project first (e.g. build_and_run.bat).")
-        return None
 
-    cmd = [exe_path, str(cpp_listen_port), str(py_send_port), "beamng"]
-    print(f"[Bridge] Launching MPPI: {' '.join(cmd)}")
-    # stdout/stderr shared with this terminal; C++ logs appear here.
+    if CONTROLLER in ("python", "jax", "torch"):
+        wrapper_name = {"python": "run_python_mppi.py", "jax": "run_jax_mppi.py",
+                        "torch": "run_torch_mppi.py"}[CONTROLLER]
+        label = {"python": "python_simple_mppi (MizuhoAOKI)",
+                 "jax": "jax-mppi (jlehtomaa, Williams 2017 / JAX)",
+                 "torch": "pytorch_mppi (UM-ARM-Lab, Williams 2017 / PyTorch)"}[CONTROLLER]
+        wrapper = os.path.join(script_dir, "competitors", wrapper_name)
+        if not os.path.isfile(wrapper):
+            print(f"[Bridge] ERROR: competitor wrapper not found: {wrapper}")
+            return None
+        cmd = [sys.executable, wrapper, str(cpp_listen_port), str(py_send_port)]
+        print(f"[Bridge] Controller = {label} [COMPETITOR]")
+    else:
+        exe_path = os.path.join(script_dir, MPPI_EXE)
+        if not os.path.isfile(exe_path):
+            print(f"[Bridge] ERROR: MPPI exe not found: {exe_path}")
+            print("[Bridge] Build the C++ project first (e.g. build_and_run.bat).")
+            return None
+        cmd = [exe_path, str(cpp_listen_port), str(py_send_port), "beamng"]
+        print("[Bridge] Controller = C++/CUDA (MppiCpp.exe) [OURS]")
+
+    print(f"[Bridge] Launching: {' '.join(cmd)}")
+    # stdout/stderr shared with this terminal; controller logs appear here.
     return subprocess.Popen(cmd, cwd=script_dir)
 
 
@@ -155,7 +217,14 @@ def full_stop(vehicle, bng, ticks=40):
 
 
 def main():
-    print("[Bridge] Controller: MPPI (C++)")
+    print(f"[Bridge] MOD = {MODE.upper()}  "
+          + ("(sim solve boyunca DURDURULUR -> gercek 20 Hz, deterministik, ADIL benchmark)"
+             if MODE == "step" else
+             "(sim GERCEK ZAMANLI kosar; kontrolcu yetismek zorunda - solve < 50 ms. DEMO)"))
+    # Zamanlama sonuclarini etkileyen anahtarlar loga girsin: hangi kosunun hangi
+    # ayarla alindigi sonradan tartisma konusu olmasin (bkz. Log/13 kare senkronu).
+    print(f"[Bridge] DRAW_TRAJECTORY = {int(DRAW_TRAJECTORY)} | "
+          f"PAUSE_DURING_SOLVE = {int(PAUSE_DURING_SOLVE)} | PROFILE = {int(PROFILE_LOOP)}")
 
     # --- Launch C++ MPPI exe ---
     mppi_proc = launch_mppi(CPP_LISTEN_PORT, PY_LISTEN_PORT)
@@ -165,7 +234,7 @@ def main():
     # --- UDP ---
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("127.0.0.1", PY_LISTEN_PORT))
-    sock.settimeout(5.0)
+    sock.settimeout(RECV_TIMEOUT)
     cpp_addr = ("127.0.0.1", CPP_LISTEN_PORT)
     print(f"[Bridge] UDP listening on 127.0.0.1:{PY_LISTEN_PORT}")
 
@@ -190,7 +259,9 @@ def main():
 
         scenario = Scenario("tech_ground", "mppi_run")
         vehicle = Vehicle("ego", model="etk800", license="MPPI")
-        vehicle.sensors.attach("electrics", Electrics())
+        # NOTE: no Electrics sensor. We only ever read the built-in 'state' sensor
+        # (pos/vel/rotation); attaching Electrics made sensors.poll() issue an extra
+        # request per loop for data nobody uses - pure latency in the control loop.
         # IDENTITY spawn - calibration is performed below
         scenario.add_vehicle(vehicle, pos=(0.0, 0.0, 0.5),
                              rot_quat=(0.0, 0.0, 0.0, 1.0))
@@ -218,6 +289,10 @@ def main():
 
         scenario.make(bng)
 
+        # DETERMINISTIC for the whole startup (load, settle, calibration, teleport) in BOTH
+        # modes: those phases drive the sim with bng.control.step(...), which requires the
+        # deterministic/paused clock. Realtime only switches over right before the main loop
+        # (see "realtime switch" below) - switching here froze the startup sequence.
         bng.settings.set_deterministic(20)  # 20 Hz = MPPI delta_t 0.05
         bng.scenario.load(scenario)
         bng.scenario.start()
@@ -365,6 +440,20 @@ def main():
             print("[Bridge] Check config.json, data/ovalpath.csv and data/costmap.csv.")
             return
 
+        # --- realtime switch (startup above ran deterministic on purpose) ---
+        # Now hand the clock back to the simulator:
+        #  * finer step rate: every beamngpy round-trip (poll waits for fresh data, control
+        #    waits for its ack) syncs to the sim step rate; 20 sps means ~50 ms EACH and caps
+        #    the loop at ~10 Hz. 50 sps makes those waits ~20 ms (same wall-clock speed).
+        #  * non-deterministic + resume: step() "assumes the sim is paused", and the settle
+        #    loops above leave it paused. The realtime main loop never calls step(), so
+        #    without resume() the sim stays frozen and the car never moves.
+        if MODE == "realtime":
+            bng.settings.set_steps_per_second(50)
+            bng.settings.set_nondeterministic()
+            bng.control.resume()
+            print("[Bridge] Realtime: sim kendi saatinde kosuyor (50 sps, resume)")
+
         print("[Bridge] MPPI loop starting...\n")
 
         # State for steer slew-rate limiter (closure)
@@ -374,15 +463,46 @@ def main():
         last_print_step = 0
 
         # --- Per-step trajectory log (diagnostics only; no effect on driving) ---
-        run_log = open("run_log.csv", "w", newline="")
-        run_log.write("step,t,mx,my,myaw_deg,v,min_dist,ref_x,ref_y,"
-                      "steer_rad,accel_cmd,throttle,brake,z,vz\n")
+        # Name the log by controller so the benchmark runs don't overwrite each other.
+        # realtime is a demo mode -> separate file, so it never clobbers benchmark data.
+        # MPPI_LAMBDA (torch competitor only) also gets its own file, so the "identical
+        # config" run and the "lambda tuned for its parameterisation" run both survive.
+        _lam_tag = ""
+        if CONTROLLER == "torch" and os.environ.get("MPPI_LAMBDA"):
+            _lam_tag = "_lam" + os.environ["MPPI_LAMBDA"].replace(".", "p")
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        run_log_name = os.path.join(
+            RUNS_DIR, f"run_log_{CONTROLLER}{_lam_tag}.csv" if MODE == "step"
+            else f"run_log_{CONTROLLER}{_lam_tag}_realtime.csv")
+        run_log = open(run_log_name, "w", newline="")
+        # step_ms = how long bng.control.step(1) took in the PREVIOUS iteration, i.e. how
+        # long BeamNG needed to advance one tick and present a frame. In step mode the C++
+        # solve queues behind that frame on the GPU, so solve_ms tracks step_ms - logging
+        # both makes that correlation measurable instead of inferred (see Log/13).
+        run_log.write("step,t,solve_ms,mx,my,myaw_deg,v,min_dist,ref_x,ref_y,"
+                      "steer_rad,accel_cmd,throttle,brake,z,vz,step_ms\n")
 
         timeout_count = 0     # consecutive C++ command timeouts
         last_draw_idx = 0     # last trajectory index drawn live in BeamNG
+        last_step_ms = 0.0    # previous iteration's bng.control.step() wall time
+        left_start = False    # car has driven clear of the start (closed-loop path guard)
+
+        # Where each loop iteration's wall-clock goes (ms, accumulated for the periodic print)
+        prof = {"pause": 0.0, "poll": 0.0, "ctrl_wait": 0.0, "apply": 0.0,
+                "step": 0.0, "draw": 0.0, "n": 0}
 
         while True:
-            vehicle.sensors.poll()
+            _t_iter = time.perf_counter()
+            # Freeze the sim BEFORE reading state, so it stays frozen through the (slow)
+            # solve wait below -> the car does not drift while the controller thinks.
+            # step(1, wait=True) later advances exactly one tick from this paused state.
+            if PAUSE_DURING_SOLVE:
+                _t = time.perf_counter()
+                bng.control.pause()
+                prof["pause"] += (time.perf_counter() - _t) * 1000
+            _t = time.perf_counter()
+            vehicle.sensors.poll("state")   # only what we use -> one request, less latency
+            prof["poll"] += (time.perf_counter() - _t) * 1000
             s = vehicle.sensors["state"]
             px_w, py_w, pz_w = s["pos"]
             vx, vy, vz_w = s["vel"]
@@ -407,11 +527,14 @@ def main():
             trajectory_world.append((px_w, py_w))
 
             # Has the end of the path been reached? Count as "done" if within 5m.
-            # step_count > 100: minimum progress guard to avoid triggering early
-            # at the start point of a closed oval path.
+            # The oval is CLOSED (start == end), so we must first confirm the car actually
+            # drove away: a step-count guard alone falsely reports "completed" when the car
+            # never moves (e.g. sim frozen) - it just sits on the end point.
             last_x, last_y = path_points[-1]
             dist_to_end = math.hypot(mx - last_x, my - last_y)
-            if dist_to_end < 5.0 and step_count > 100:
+            if dist_to_end > 15.0:
+                left_start = True
+            if dist_to_end < 5.0 and step_count > 100 and left_start:
                 print(f"\n[Bridge] PATH COMPLETED: {dist_to_end:.2f}m from end point "
                       f"({step_count} steps, {time.time()-t_start:.1f}s)")
                 # Send "stop" signal to C++ (valid=0)
@@ -459,8 +582,10 @@ def main():
             sock.sendto(state_bytes, cpp_addr)
 
             # Wait for control command
+            _t = time.perf_counter()
             try:
                 data, _ = sock.recvfrom(1024)
+                prof["ctrl_wait"] += (time.perf_counter() - _t) * 1000
                 timeout_count = 0
             except socket.timeout:
                 # MPPI connection lost: stop the car instead of leaving it
@@ -477,9 +602,11 @@ def main():
                     break
                 continue
 
-            if len(data) != struct.calcsize("dddi"):
+            if len(data) != struct.calcsize("ddddi"):
                 continue
-            ctrl_time, steer_rad, accel_cmd, reset_flag = struct.unpack("dddi", data)
+            # solve_ms = the controller's own MPPI compute time for this cycle (C++ <chrono>
+            # / Python perf_counter). Logged into run_log so each MPPI has ONE csv with it.
+            ctrl_time, steer_rad, accel_cmd, solve_ms, reset_flag = struct.unpack("ddddi", data)
 
             if reset_flag:
                 break
@@ -507,19 +634,31 @@ def main():
             throttle, brake = accel_to_throttle_brake(accel_cmd, v)
             debug_extra = f"u=(s{steer_rad:+.2f},a{accel_cmd:+.2f})"
 
+            _t = time.perf_counter()
             vehicle.control(steering=steer_norm, throttle=throttle, brake=brake)
+            prof["apply"] += (time.perf_counter() - _t) * 1000
 
-            run_log.write(f"{step_count},{time.time()-t_start:.3f},{mx:.3f},{my:.3f},"
+            run_log.write(f"{step_count},{time.time()-t_start:.3f},{solve_ms:.4f},"
+                          f"{mx:.3f},{my:.3f},"
                           f"{math.degrees(myaw):.2f},{v:.3f},{min_dist:.3f},"
                           f"{ref_x:.3f},{ref_y:.3f},{steer_rad:.4f},{accel_cmd:.4f},"
-                          f"{throttle:.3f},{brake:.3f},{pz_w:.3f},{vz_w:.3f}\n")
+                          f"{throttle:.3f},{brake:.3f},{pz_w:.3f},{vz_w:.3f},"
+                          f"{last_step_ms:.3f}\n")
             run_log.flush()
 
-            bng.control.step(1, wait=True)
+            # Only DRIVE the sim clock in deterministic (step) mode. In realtime the sim runs
+            # on its own clock, so calling step(1, wait=True) here would just burn ~88 ms/iter
+            # waiting out a tick and throttle the control rate to ~6.5 Hz.
+            if MODE == "step":
+                _t = time.perf_counter()
+                bng.control.step(1, wait=True)
+                last_step_ms = (time.perf_counter() - _t) * 1000
+                prof["step"] += last_step_ms
             step_count += 1
 
-            # RED trajectory drawn live in BeamNG
-            if len(trajectory_world) - last_draw_idx >= 3:
+            # RED trajectory drawn live in BeamNG (extra round-trip; off in realtime)
+            if DRAW_TRAJECTORY and len(trajectory_world) - last_draw_idx >= 3:
+                _t = time.perf_counter()
                 try:
                     seg = [(x, y, 0.3) for (x, y) in trajectory_world[last_draw_idx:]]
                     bng.debug.add_polyline(seg, rgba_color=(1.0, 0.1, 0.1, 1.0),
@@ -527,6 +666,19 @@ def main():
                     last_draw_idx = len(trajectory_world) - 1   # overlap 1 to connect
                 except Exception:
                     pass
+                prof["draw"] += (time.perf_counter() - _t) * 1000
+
+            prof["n"] += 1
+            prof["iter"] = prof.get("iter", 0.0) + (time.perf_counter() - _t_iter) * 1000
+            if PROFILE_LOOP and prof["n"] >= 20:
+                n = prof["n"]
+                print(f"[PROFIL] dongu {prof['iter']/n:6.1f} ms/adim = "
+                      f"pause {prof['pause']/n:5.1f} + poll {prof['poll']/n:5.1f} + "
+                      f"kontrol-bekle {prof['ctrl_wait']/n:6.1f} + uygula {prof['apply']/n:5.1f} + "
+                      f"step {prof['step']/n:5.1f} + ciz {prof['draw']/n:5.1f}")
+                for k in prof:
+                    prof[k] = 0.0
+                prof["n"] = 0
 
             if step_count - last_print_step >= 10:
                 dt = time.time() - t_start
@@ -546,7 +698,7 @@ def main():
     finally:
         try:
             run_log.close()
-            print("[Bridge] run_log.csv written")
+            print(f"[Bridge] {run_log_name} written")
         except Exception:
             pass
         # Make sure the car is parked (also covers Ctrl+C / exception exits): NEUTRAL

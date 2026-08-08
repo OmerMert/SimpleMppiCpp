@@ -72,6 +72,10 @@ public:
     // Returns: [ref_x, ref_y, ref_yaw, ref_v]
     Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
 
+    // Vehicle body box used by the collision check / CBF. Read from config.json
+    // (VEHICLE_FOOTPRINT) so the C++ MPPI and every competitor wrapper use the SAME car.
+    void set_vehicle_footprint(double width, double length, double safety_margin);
+
     // Obstacle costmap: EXTRA soft cost added on top of the analytic CBF (does NOT
     // replace it - the CBF footprint/collision logic in mppi_core.cu is untouched).
     // Not calling this (or weight <= 0) simply disables the term.
@@ -93,13 +97,12 @@ private:
     Vector4d stage_cost_weight;
     Vector4d terminal_cost_weight;
     std::vector<Obstacle> obstacles;
-    double vehicle_width = 1.9;    // realistic etk800 width [m] (was 3.0, too wide)
-    double vehicle_length = 4.5;   // realistic etk800 length [m]
-    double safety_margin_rate = 1.0;   // model footprint == real car. 1.15 inflated the
-                                       // half-width to 1.09 > the 1.0 m gap to a side obstacle,
-                                       // so y=0 (the reference line) read as a collision and the
-                                       // car fled ~1 m and braked/stalled. 1.0 keeps y=0 feasible
-                                       // (min_h=0.05) so only a gentle ~0.3 m swerve is needed.
+    // Vehicle body box (etk800). Defaults are only a fallback - main.cpp overwrites them
+    // from config.json VEHICLE_FOOTPRINT via set_vehicle_footprint(), which is also what
+    // the competitor wrappers read, so every controller collides with the same car.
+    double vehicle_width = 1.9;
+    double vehicle_length = 4.5;
+    double safety_margin_rate = 1.0;
 
     // Vehicle parameters
     double dt;

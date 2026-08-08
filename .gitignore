@@ -3,5 +3,14 @@ build
 *.exe
 *.pdb
 Log
+paper
 .claude
 __pycache__
+# Cloned competitor repos (external, reproducible via clone) + run outputs
+competitors/python_simple_mppi/
+competitors/jax_mppi/
+competitors/*_timing.csv
+# Generated analysis/comparison figures (regenerate with analyze_run.py / compare_mppi.py)
+/mppi_comparison*.png
+/run_log_*_analysis.png
+

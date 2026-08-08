@@ -2,8 +2,21 @@
 #include <iostream>
 #include <cmath>
 #include <limits>
+#include <chrono>
+#include <cstdlib>
 
 #define M_PI       3.14159265358979323846
+
+// Per-phase breakdown of calc_control_input, printed every PROFILE_EVERY solves when
+// MPPI_PHASE_PROFILE=1. Answers "how much of our solve is CPU and how much is GPU" -
+// the CPU part is what BeamNG's physics threads compete with.
+namespace {
+using Clock = std::chrono::steady_clock;
+inline double ms_since(const Clock::time_point& t0) {
+    return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+}
+constexpr int PROFILE_EVERY = 200;
+}  // namespace
 
 // --- Constructor ---
 MPPIController::MPPIController(
@@ -39,15 +52,25 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     // set initial x value from observation
     State x0 = observed_x;
 
-    // get the waypoint closest to current vehicle position 
+    static const bool phase_profile = [] {
+        const char* e = std::getenv("MPPI_PHASE_PROFILE");
+        return e && e[0] == '1';
+    }();
+    static double t_search = 0, t_noise = 0, t_flat = 0, t_gpu = 0, t_weight = 0, t_rest = 0;
+    static int n_profiled = 0;
+    auto t_phase = Clock::now();
+
+    // get the waypoint closest to current vehicle position
     _get_nearest_waypoint(x0[0], x0[1], true);
     if (prev_waypoints_idx >= ref_path.rows()) {
         std::cerr << "[Finish] End of the reference path." << std::endl;
         throw std::out_of_range("End of the reference path.");
     }
+    t_search += ms_since(t_phase); t_phase = Clock::now();
 
     // Noise matrix generation
-    Eigen::MatrixXd epsilon = _calc_epsilon(); 
+    Eigen::MatrixXd epsilon = _calc_epsilon();
+    t_noise += ms_since(t_phase); t_phase = Clock::now();
 
     // Flatten the epsilon matrix for GPU
     std::vector<float> h_noise(K * T * 2);
@@ -81,6 +104,7 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     std::vector<float> h_costs(K);
     float inv_sigma_steer = 1.0f / (float)Sigma(0,0);
     float inv_sigma_accel = 1.0f / (float)Sigma(1,1);
+    t_flat += ms_since(t_phase); t_phase = Clock::now();
 
     // Run GPU Kernel
     launch_mppi_gpu(
@@ -107,6 +131,8 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         obs_rows, obs_cols, obs_res, obs_x_min, obs_y_min, obstacle_costmap_weight
     );
 
+    t_gpu += ms_since(t_phase); t_phase = Clock::now();
+
     // Fill the cost vector from GPU output
     Eigen::VectorXd S(K);
     for(int k=0; k<K; ++k) {
@@ -124,8 +150,14 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
         }
     }
     
-    // apply moving average filter for smoothing input sequence
-    w_epsilon = _moving_average_filter(w_epsilon, 3);
+    t_weight += ms_since(t_phase); t_phase = Clock::now();
+
+    // Smooth the control update along the horizon. window_size=10 is the reference
+    // implementation's value (MizuhoAOKI mppi_pathtracking_obav.py:121), so our port
+    // stays faithful here. A window of 3 was A/B tested: it tracks tighter (mean
+    // deviation 0.359 -> 0.321 m in BeamNG) but makes the steering ~2.3x busier
+    // (mean |dsteer| 0.0064 -> 0.0147 rad/step). We prefer the smoother command.
+    w_epsilon = _moving_average_filter(w_epsilon, 10);
     
     // update control input sequence
     u += w_epsilon;
@@ -145,6 +177,21 @@ std::tuple<Control, MatrixXd> MPPIController::calc_control_input(const State& ob
     // update previous control input sequence
     u_prev.block(0, 0, T - 1, dim_u) = u.block(1, 0, T - 1, dim_u);
     u_prev.row(T - 1) = u.row(T - 1);
+
+    t_rest += ms_since(t_phase);
+    if (phase_profile && ++n_profiled % PROFILE_EVERY == 0) {
+        const double n = PROFILE_EVERY;
+        const double cpu = (t_search + t_noise + t_flat + t_weight + t_rest) / n;
+        const double gpu = t_gpu / n;
+        std::cout << "[PHASE] " << PROFILE_EVERY << " solve ort (ms): "
+                  << "arama " << t_search / n << " | gurultu " << t_noise / n
+                  << " | duzlestir " << t_flat / n << " | GPU " << gpu
+                  << " | agirlik " << t_weight / n << " | kalan " << t_rest / n
+                  << "  =>  CPU " << cpu << " (%" << 100.0 * cpu / (cpu + gpu)
+                  << ")  GPU " << gpu << " (%" << 100.0 * gpu / (cpu + gpu) << ")"
+                  << std::endl;
+        t_search = t_noise = t_flat = t_gpu = t_weight = t_rest = 0;
+    }
 
     return std::make_tuple(u.row(0), optimal_traj);
 }
@@ -169,14 +216,15 @@ Control MPPIController::_g(const Control& v) const {
 }
 
 // Finds the nearest waypoint on the reference path.
-// IMPORTANT: In dynamic systems like BeamNG the vehicle can slide backwards.
-// Instead of searching only forward, this now also looks backward (bidirectional window).
+// Forward-only window, identical to the reference implementation (MizuhoAOKI
+// _get_nearest_waypoint, SEARCH_IDX_LEN=200). A 50-step backward window was tried for
+// "the car can slide backwards in BeamNG", but over 2675 logged steps the nearest index
+// never moved backwards - it only cost ~25% extra search work per rollout step.
 Vector4d MPPIController::_get_nearest_waypoint(double x, double y, bool update_prev_idx) {
 
     const int SEARCH_FWD = 200;    // waypoints to search forward
-    const int SEARCH_BWD = 50;     // waypoints to search backward
-    
-    int start_idx = std::max(0, prev_waypoints_idx - SEARCH_BWD);
+
+    int start_idx = std::max(0, prev_waypoints_idx);
     int end_idx = std::min(static_cast<int>(ref_path.rows()), prev_waypoints_idx + SEARCH_FWD);
 
     MatrixXd search_segment = ref_path.block(start_idx, 0, end_idx - start_idx, 2); 
@@ -236,6 +284,12 @@ VectorXd MPPIController::_compute_weights(const VectorXd& S) const {
         w = exp_term / eta;
     }
     return w;
+}
+
+void MPPIController::set_vehicle_footprint(double width, double length, double safety_margin) {
+    if (width > 0.0)         vehicle_width = width;
+    if (length > 0.0)        vehicle_length = length;
+    if (safety_margin > 0.0) safety_margin_rate = safety_margin;
 }
 
 void MPPIController::set_obstacle_costmap(const std::vector<float>& data, int rows, int cols,

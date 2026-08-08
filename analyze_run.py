@@ -4,16 +4,22 @@ analyze_run.py - Analyze a BeamNG-MPPI run (run_log.csv vs the reference path).
 Answers: does it follow the path? where/how much does it deviate? why?
 (correlates cross-track error with path curvature, speed, steering command)
 """
+import sys
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Which run log to analyze (default run_log_cpp.csv; pass e.g. run_log_python.csv).
+LOG_FILE = sys.argv[1] if len(sys.argv) > 1 else os.path.join("runs", "run_log_cpp.csv")
+OUT_PNG = os.path.splitext(os.path.basename(LOG_FILE))[0] + "_analysis.png"
+
 # ---- load ----
 path = np.loadtxt("data/ovalpath.csv", delimiter=",", skiprows=1)  # x,y,yaw,ref_v
 px, py, pref_v = path[:, 0], path[:, 1], path[:, 3]
 
-log = np.genfromtxt("run_log.csv", delimiter=",", names=True)
+log = np.genfromtxt(LOG_FILE, delimiter=",", names=True)
 step = log["step"]; t = log["t"]
 mx, my = log["mx"], log["my"]
 yaw = log["myaw_deg"]; v = log["v"]; dev = log["min_dist"]
@@ -93,5 +99,5 @@ a.set_xlabel("t [s]"); a.set_ylabel("steer [rad]")
 a.set_title("Steering command vs path curvature"); a.legend(fontsize=8); a.grid(alpha=0.3)
 
 fig.tight_layout()
-fig.savefig("run_analysis.png", dpi=120)
-print("\nsaved run_analysis.png")
+fig.savefig(OUT_PNG, dpi=120)
+print(f"\nsaved {OUT_PNG}")

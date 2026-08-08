@@ -1,7 +1,7 @@
 {
     "_README": {
         "_about": "Single source of truth for the C++/CUDA MPPI controller, the BeamNG bridge and the map generators. JSON has no comment syntax, so the documentation lives in this block (same convention as _calibration_info). Everything is read at process start: editing a value only needs a restart, EXCEPT the items listed under _needs_rebuild.",
-        "_needs_rebuild": "Vehicle footprint used by the CBF (vehicle_width 1.9, vehicle_length 4.5, safety_margin_rate 1.0) is NOT in this file - it lives in MPPIController.h and requires 'cmake --build build --config Debug'.",
+        "_needs_rebuild": "Nothing here needs a rebuild anymore: the vehicle footprint moved into VEHICLE_FOOTPRINT below and is read at process start like everything else. Rebuild only after editing C++/CUDA sources: 'cmake --build build --config Release' (use Release for benchmarking - Debug is ~20x slower).",
         "_after_editing": "Obstacle placement moved OUT of this file into scenario.py (OBSTACLES). After editing scenario.py, re-run generate_costmaps.py: it rebuilds OBSTACLES_FILE and OBSTACLE_COSTMAP_FILE (and the preview) from the ONE scenario.py source. beamng_bridge.py imports scenario.py directly for the physical spawn, so it always agrees with what generate_costmaps.py just rasterized.",
         "delta_t": "Control period [s]. MUST match the BeamNG tick rate; the bridge runs deterministic 20 Hz, so 0.05.",
         "wheel_base": "Effective wheelbase L [m] of the kinematic bicycle model. This is a SYSTEM-ID fit (see _calibration_info), NOT the physical etk800 wheelbase (~2.82 m). Only the yaw gain G = (v/L)*tan(steer) is identifiable; L alone is a gauge.",
@@ -22,11 +22,12 @@
         "OBSTACLE_COSTMAP_INFLUENCE_RADIUS": "Influence radius [m] used ONLY when generate_costmaps.py rasterizes the obstacle costmap - independent from CBF_PARAMETERS.influence_radius (which stays tight/exact for the analytic CBF). Needs to be a few grid cells wide (>= GRID_RESOLUTION) or the soft falloff band is thinner than one cell and the costmap is effectively invisible.",
         "REF_PATH_FILE": "Reference path CSV with columns x, y, yaw, v (yaw is normalised to [-pi, pi] on load).",
         "GRID_RESOLUTION": "Obstacle-costmap grid cell size [m]. The C++ side and generate_costmaps.py MUST agree or the map is misaligned.",
-        "GRID_MARGIN": "Margin [m] added around the reference-path extent to size the obstacle costmap grid. Same agreement requirement as GRID_RESOLUTION."
+        "GRID_MARGIN": "Margin [m] added around the reference-path extent to size the obstacle costmap grid. Same agreement requirement as GRID_RESOLUTION.",
+        "VEHICLE_FOOTPRINT": "Vehicle body box used by the 9-point collision check, in metres. This is the PROBLEM definition (the physical etk800), not an algorithm choice - the C++ MPPI and every competitor wrapper read it from here so all controllers avoid obstacles with the SAME car. safety_margin_rate scales the box (1.0 = model footprint equals the real car; 1.15 once inflated the half-width to 1.09 m > the 1.0 m gap to a side obstacle, so the reference line itself read as a collision - see Log/10)."
     },
     "delta_t": 0.05,
-    "wheel_base": 1.5,
-    "max_steer_abs": 0.3,
+    "wheel_base": 2.82,
+    "max_steer_abs": 0.534,
     "max_accel_abs": 2.5,
     "horizon_step_T": 20,
     "number_of_samples_K": 1000,
@@ -35,7 +36,7 @@
     "param_alpha": 0.98,
     "sigma": [
         [
-            0.05,
+            0.158,
             0
         ],
         [
@@ -57,9 +58,14 @@
     ],
     "OBSTACLES_FILE": "data/obstacles.json",
     "CBF_PARAMETERS": {
-        "influence_radius": 0.2,
-        "cbf_weight": 10,
+        "influence_radius": 0.6,
+        "cbf_weight": 0,
         "decay_rate": 2
+    },
+    "VEHICLE_FOOTPRINT": {
+        "width": 1.9,
+        "length": 4.5,
+        "safety_margin_rate": 1.0
     },
     "OBSTACLE_COSTMAP_FILE": "data/obstacle_costmap.csv",
     "OBSTACLE_COSTMAP_WEIGHT": 0.0,
