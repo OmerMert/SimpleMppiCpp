@@ -1,18 +1,13 @@
-"""
-generate_costmaps.py - scenario.py'deki engel tanimlarindan engel costmap'i uretir
-+ C++ tarafinin okuyacagi ham engel listesini disari yazar.
+"""Builds the obstacle costmap from scenario.py and exports the raw list the C++ side reads.
 
-Girdi (tek kaynak): scenario.py OBSTACLES.
-Ciktilar (config.json'daki *_FILE anahtarlariyla eslesir):
-  - data/obstacle_costmap.csv   : engel maliyet grid'i (MPPI'daki CBF'ye EK, onu
-                                   degistirmez - bkz. obstacles.py docstring)
-  - data/obstacles.json         : ham engel listesi (C++ CBF + BeamNG fiziksel
-                                   spawn icin - bunlar costmap DEGIL, tam gecen
-                                   cemberler/dikdortgenler gerektirir)
+Input: scenario.py OBSTACLES. Outputs, matching the *_FILE keys in config.json:
+  - data/obstacle_costmap.csv           cost grid, additive to the CBF (see obstacles.py)
+  - data/obstacles.json                 raw list for the C++ CBF and the BeamNG spawn,
+                                        which need exact circles rather than a grid
   - data/obstacle_costmap_preview.png
 
-Grid sinirlari (x_min..x_max, y_min..y_max) referans yol + GRID_MARGIN'dan gelir
-(main.cpp bu varsayimla hizalanir - bkz. main.cpp ReadConfig).
+Grid bounds come from the reference path plus GRID_MARGIN; main.cpp ReadConfig assumes
+the same convention.
 """
 import csv
 import json
@@ -71,15 +66,15 @@ def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, circles=None):
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
     except ImportError:
-        print("[WARNING] matplotlib yok, onizleme atlandi")
+        print("[WARNING] matplotlib not available, skipping the preview")
         return
 
     x_min, x_max, y_min, y_max = bounds
     fig, ax = plt.subplots(figsize=(8, 6))
     im = ax.imshow(grid, origin="lower", extent=[x_min, x_max, y_min, y_max],
                    cmap="magma", interpolation="bilinear", aspect="equal")
-    ax.plot(ref_xs, ref_ys, "b--", linewidth=1.6, label="Referans yol")
-    ax.plot(0, 0, "g^", markersize=11, label="Baslangic")
+    ax.plot(ref_xs, ref_ys, "b--", linewidth=1.6, label="Reference path")
+    ax.plot(0, 0, "g^", markersize=11, label="Start")
     if circles:
         for (cx, cy, r) in circles:
             ax.add_patch(patches.Circle((cx, cy), r, fill=False,
@@ -90,7 +85,7 @@ def save_preview(grid, ref_xs, ref_ys, bounds, title, filepath, circles=None):
     fig.tight_layout()
     fig.savefig(filepath, dpi=140, bbox_inches="tight")
     plt.close(fig)
-    print(f"[OK] Onizleme: {filepath}")
+    print(f"[OK] Preview: {filepath}")
 
 
 def main():
@@ -102,40 +97,40 @@ def main():
     margin = cfg["GRID_MARGIN"]
     ref_xs, ref_ys = load_ref_path(cfg["REF_PATH_FILE"])
     rows, cols, bounds = grid_bounds(resolution, margin, ref_xs, ref_ys)
-    print(f"Grid: {rows}x{cols} @ {resolution} m/hucre, margin {margin} m")
+    print(f"Grid: {rows}x{cols} @ {resolution} m/cell, margin {margin} m")
 
-    # --- Engel (obstacle) costmap ---
+    # --- obstacle costmap ---
     circles = load_obstacle_circles(OBSTACLES)
     cbf = cfg["CBF_PARAMETERS"]
-    # NOT: CBF_PARAMETERS.influence_radius (0.2 m) analitik CBF icin ayarli - GRID_RESOLUTION
-    # (1.0 m) ile kullanilirsa yumusak gecis bandi hucre boyutundan kucuk kalir ve costmap'te
-    # neredeyse hic gorunmez. Bu yuzden costmap ayrica (ve daha genis) bir etki yaricapi
-    # kullanir; CBF'nin kendi (dar/hassas) yaricapina DOKUNMAZ.
+    # CBF_PARAMETERS.influence_radius is tuned for the analytic CBF and is narrower than
+    # GRID_RESOLUTION, so reusing it here would put the whole falloff band inside one cell
+    # and leave the costmap almost blank. The costmap therefore takes its own, wider
+    # radius; the CBF keeps its narrow one.
     obstacle_influence_radius = cfg.get("OBSTACLE_COSTMAP_INFLUENCE_RADIUS", cbf["influence_radius"])
-    print(f"\nEngel sayisi: {len(circles)} (costmap influence_radius={obstacle_influence_radius} m)")
+    print(f"\nObstacles: {len(circles)} (costmap influence_radius={obstacle_influence_radius} m)")
     for (cx, cy, r) in circles:
-        print(f"  merkez=({cx},{cy}) r={r}")
+        print(f"  centre=({cx},{cy}) r={r}")
     obs_grid = build_obstacle_grid(circles, obstacle_influence_radius, cbf["cbf_weight"],
                                    cbf["decay_rate"], resolution, rows, cols, bounds)
     obstacle_costmap_file = cfg.get("OBSTACLE_COSTMAP_FILE", "data/obstacle_costmap.csv")
     save_grid(obs_grid, obstacle_costmap_file)
     print(f"[OK] Obstacle costmap: {obstacle_costmap_file} "
-          f"(maliyet {obs_grid.min():.4f}..{min(obs_grid.max(), 1e6):.4f})")
+          f"(cost {obs_grid.min():.4f}..{min(obs_grid.max(), 1e6):.4f})")
     save_preview(obs_grid, ref_xs, ref_ys, bounds,
-                 "Engel (obstacle) EK maliyet (CBF'ye ek, onun yerine degil)",
+                 "Obstacle costmap (additional to the CBF, not a replacement)",
                  obstacle_costmap_file.replace(".csv", "_preview.png"),
                  circles=circles)
 
-    # --- Ham engel listesi (C++ CBF + BeamNG fiziksel spawn icin) ---
+    # --- raw obstacle list, for the C++ CBF and the BeamNG spawn ---
     obstacles_file = cfg.get("OBSTACLES_FILE", "data/obstacles.json")
     os.makedirs(os.path.dirname(obstacles_file), exist_ok=True)
     with open(obstacles_file, "w") as f:
         json.dump(OBSTACLES, f, indent=2)
-    print(f"[OK] Ham engel listesi: {obstacles_file}")
+    print(f"[OK] Raw obstacle list: {obstacles_file}")
 
     print("\n" + "=" * 60)
-    print("  BITTI. C++ tarafini yeniden calistir (config.json degismedi,")
-    print("  sadece grid/JSON dosyalari guncellendi).")
+    print("  DONE. Re-run the C++ side (config.json is unchanged, only the")
+    print("  grid and JSON files were regenerated).")
     print("=" * 60)
 
 

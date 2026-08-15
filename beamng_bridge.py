@@ -59,25 +59,27 @@ CONTROLLER = (sys.argv[1] if len(sys.argv) > 1
               else os.environ.get("MPPI_CONTROLLER", "cpp")).lower()
 
 # mode (arg 2, or MPPI_MODE env; default "step"):
-#   step     -> BENCHMARK mode. The sim is PAUSED while the controller thinks, then advanced
-#               exactly one tick (true 20 Hz) per control. Deterministic and independent of
-#               wall-clock speed, so a slow and a fast controller face IDENTICAL dynamics ->
-#               fair comparison. (Without it BeamNG free-runs during the solve: the car drifts
-#               ~v*t, a slow controller goes unstable, and a fast one ends up controlling at a
-#               lower, wall-clock-dependent rate - measured ~5 Hz for C++ vs 20 Hz for Python.)
-#   realtime -> DEMO mode. No pausing; the simulation runs at real time and the controller must
-#               keep up (needs solve < 50 ms). Shows whether a controller is genuinely
-#               real-time capable. NOT for fair benchmarking.
+#   step     -> benchmark mode. The sim is paused while the controller thinks, then advanced
+#               exactly one tick (a true 20 Hz) per control. This is deterministic and
+#               independent of wall-clock speed, so a slow and a fast controller face the
+#               same dynamics. Without it BeamNG free-runs during the solve: the car drifts
+#               by ~v*t, a slow controller goes unstable, and a fast one ends up controlling
+#               at a lower, wall-clock-dependent rate - measured ~5 Hz for C++ against 20 Hz
+#               for Python.
+#   realtime -> demo mode. No pausing; the simulation runs at real time and the controller
+#               has to keep up, needing solve < 50 ms. This shows whether a controller is
+#               genuinely real-time capable, but it is not a fair basis for benchmarking.
 MODE = (sys.argv[2] if len(sys.argv) > 2
         else os.environ.get("MPPI_MODE", "step")).lower()
 if MODE not in ("step", "realtime"):
-    print(f"[Bridge] UYARI: bilinmeyen mod '{MODE}', 'step' kullanilacak.")
+    print(f"[Bridge] WARNING: unknown mode '{MODE}', falling back to 'step'.")
     MODE = "step"
 PAUSE_DURING_SOLVE = (MODE == "step")
 
 # Live red-trajectory drawing costs an extra BeamNG round-trip every few steps. In realtime
-# the loop period is what limits the control rate, so drawing is OFF there by default; in
-# step mode it is free (sim is paused anyway) and useful to watch. Override: MPPI_DRAW=1/0.
+# the loop period is what limits the control rate, so drawing is off there by default; in
+# step mode it is free (the sim is paused anyway) and useful to watch. Override with
+# MPPI_DRAW=1/0.
 DRAW_TRAJECTORY = os.environ.get("MPPI_DRAW", "1" if MODE == "step" else "0") == "1"
 # Print a breakdown of where each loop iteration's wall-clock time goes (poll / control /
 # step / draw / controller). Set MPPI_PROFILE=0 to silence.
@@ -95,10 +97,10 @@ with open("config.json", 'r') as f:
 # --- PATH SELECTION ---
 PATH_CSV = data["REF_PATH_FILE"]
 
-# Obstacles: SAME source the C++ CBF and the obstacle costmap are built from
-# (scenario.py OBSTACLES, imported above). MPPI-frame: [x, y, r] circle or
-# [x, y, w, h] rectangle. Spawned physically here so MPPI (avoids via CBF) and
-# the real car (collides) share one source.
+# Obstacles come from the same source as the C++ CBF and the obstacle costmap
+# (scenario.py OBSTACLES, imported above), in the MPPI frame as [x, y, r] circles or
+# [x, y, w, h] rectangles. They are spawned physically here so that the MPPI, which
+# avoids them via the CBF, and the real car, which collides with them, agree.
 
 # Effective steering angle [rad] at full lock (steering=1.0) for the BeamNG etk800.
 MAX_STEER_RAD = data["max_steer_abs"]  # rad 
@@ -136,12 +138,10 @@ def accel_to_throttle_brake(accel_cmd, v, _state=[0.0]):
     the earlier approach that bypassed MPPI with a pure PI has been removed.
     """
     dt = 0.05
-    # Convert MPPI acceleration command to a speed target (with preview horizon so that
-    # a brake command actually brakes). NOTE: throttle is intentionally kept gentle
-    # and clamped by THROTTLE_CAP. Otherwise the etk800 receives a near-full-throttle
-    # command from standstill, spins/launches, the speed sensor (v) goes haywire,
-    # and the controller goes blind (20-30+ mph runaway). Gentle throttle prevents
-    # this initial wheelspin.
+    # Convert the MPPI acceleration command to a speed target, with a preview horizon so
+    # that a brake command actually brakes. Throttle is deliberately gentle and clamped by
+    # THROTTLE_CAP: otherwise the etk800 gets near-full throttle from standstill, spins up,
+    # and the speed reading goes haywire, leaving the controller blind.
     PREVIEW = 0.25         # s (tunable)
     THROTTLE_CAP = 0.40    # upper throttle limit - prevents launch/wheelspin
     v_meas = max(0.0, v)   # guard against glitchy/negative reading (spin) blinding throttle
@@ -164,8 +164,8 @@ def accel_to_throttle_brake(accel_cmd, v, _state=[0.0]):
         brake = min(-u, 1.0)
     return throttle, brake
 
-# Launches the selected controller (C++ exe or the Python competitor). Both speak the
-# SAME UDP protocol, so the rest of the harness does not change.
+# Launches the selected controller, either the C++ exe or a Python competitor. They speak
+# the same UDP protocol, so the rest of the harness is unaffected by the choice.
 def launch_mppi(cpp_listen_port, py_send_port):
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -217,12 +217,12 @@ def full_stop(vehicle, bng, ticks=40):
 
 
 def main():
-    print(f"[Bridge] MOD = {MODE.upper()}  "
-          + ("(sim solve boyunca DURDURULUR -> gercek 20 Hz, deterministik, ADIL benchmark)"
+    print(f"[Bridge] MODE = {MODE.upper()}  "
+          + ("(sim paused during the solve -> true 20 Hz, deterministic, fair benchmark)"
              if MODE == "step" else
-             "(sim GERCEK ZAMANLI kosar; kontrolcu yetismek zorunda - solve < 50 ms. DEMO)"))
-    # Zamanlama sonuclarini etkileyen anahtarlar loga girsin: hangi kosunun hangi
-    # ayarla alindigi sonradan tartisma konusu olmasin (bkz. Log/13 kare senkronu).
+             "(sim runs in real time; the controller must keep up - solve < 50 ms. DEMO)"))
+    # Log the switches that affect timing results, so it stays clear afterwards which run
+    # was taken under which settings (see Log/13 on frame sync).
     print(f"[Bridge] DRAW_TRAJECTORY = {int(DRAW_TRAJECTORY)} | "
           f"PAUSE_DURING_SOLVE = {int(PAUSE_DURING_SOLVE)} | PROFILE = {int(PROFILE_LOOP)}")
 
@@ -259,14 +259,14 @@ def main():
 
         scenario = Scenario("tech_ground", "mppi_run")
         vehicle = Vehicle("ego", model="etk800", license="MPPI")
-        # NOTE: no Electrics sensor. We only ever read the built-in 'state' sensor
-        # (pos/vel/rotation); attaching Electrics made sensors.poll() issue an extra
-        # request per loop for data nobody uses - pure latency in the control loop.
-        # IDENTITY spawn - calibration is performed below
+        # No Electrics sensor: only the built-in 'state' sensor (pos/vel/rotation) is ever
+        # read, and attaching Electrics made sensors.poll() issue an extra request per loop
+        # for data nobody uses, which is pure latency in the control loop.
+        # Spawned at identity; calibration happens below.
         scenario.add_vehicle(vehicle, pos=(0.0, 0.0, 0.5),
                              rot_quat=(0.0, 0.0, 0.0, 1.0))
 
-        # --- Physical obstacles (must be added BEFORE scenario.make) ---
+        # --- Physical obstacles, which must be added before scenario.make ---
         # config OBSTACLES are in the MPPI frame; map to BeamNG world with the
         # nominal spawn transform (spawn at origin, identity quaternion ->
         # pos_rotation=+90deg, so MPPI (x,y) -> world (y, -x)). Circle->cylinder,
@@ -300,19 +300,17 @@ def main():
         vehicle.control(throttle=0.0, brake=0.0, steering=0.0)
         bng.control.step(10, wait=True)
 
-        # --- CALIBRATION ---
-        # THERE ARE TWO CRITICAL TRANSFORMS - do not confuse them:
+        # --- Calibration ---
+        # There are two separate transforms here, and they are easy to conflate:
         #
-        # 1) POSITION transform (world x,y -> MPPI x,y):
-        #    Vehicle forward in world is +y; in MPPI it must be +x.
-        #    So we rotate the world x,y by -(pi/2 + yaw0).
+        # 1) Position (world x,y -> MPPI x,y). Vehicle forward is +y in world and must be
+        #    +x in MPPI, so the world x,y is rotated by -(pi/2 + yaw0).
         #
-        # 2) YAW transform (world rotation angle -> MPPI yaw):
-        #    Algebraically, VEHICLE_FORWARD_OFFSET appears in both
-        #    source and target frames simultaneously and cancels out.
-        #    Subtracting only yaw0_world is sufficient.
+        # 2) Yaw (world rotation angle -> MPPI yaw). VEHICLE_FORWARD_OFFSET appears in both
+        #    the source and the target frame and cancels algebraically, so subtracting
+        #    yaw0_world alone is enough.
         #
-        # For etk800: forward = +y in the identity quaternion
+        # For the etk800, forward is +y at the identity quaternion.
         VEHICLE_FORWARD_OFFSET = -math.pi / 2
 
         vehicle.sensors.poll()
@@ -406,10 +404,9 @@ def main():
         for _ in range(20):
             bng.control.step(1, wait=True)
 '''
-        # Teleport the vehicle back to (0,0) in MPPI frame.
-        # NOTE: the calibration test may have changed the vehicle's orientation.
-        # Re-apply the spawn quaternion to also reset the heading.
-        # reset=True: also clears velocity and damage.
+        # Teleport the vehicle back to (0,0) in the MPPI frame. The calibration test may
+        # have changed its orientation, so the spawn quaternion is re-applied to reset the
+        # heading too; reset=True also clears velocity and damage.
         print("[Bridge] Teleporting vehicle to (0,0) + original orientation...")
         vehicle.teleport(pos=(x0_world, y0_world, 0.5),
                          rot_quat=(qx, qy, qz, qw),
@@ -452,7 +449,7 @@ def main():
             bng.settings.set_steps_per_second(50)
             bng.settings.set_nondeterministic()
             bng.control.resume()
-            print("[Bridge] Realtime: sim kendi saatinde kosuyor (50 sps, resume)")
+            print("[Bridge] Realtime: the sim runs on its own clock (50 sps, resumed)")
 
         print("[Bridge] MPPI loop starting...\n")
 
@@ -511,13 +508,12 @@ def main():
 
             mx, my, myaw = world_to_mppi(px_w, py_w, yaw_w)
             # Signed longitudinal velocity (negative = reversing).
-            # IMPORTANT: project the velocity in the MPPI frame (rotated by
-            # pos_rotation, exactly like world_to_mppi) onto the MPPI heading.
-            # Projecting raw world velocity onto yaw_w is WRONG: the etk800's
-            # forward axis is offset by VEHICLE_FORWARD_OFFSET from the quaternion
-            # yaw, so that formula reads ~0/negative while the car is actually
-            # moving forward. After the max(0,v) clamp that sent v=0 to MPPI and
-            # blinded it (steering has no effect in its model when v=0).
+            # The velocity has to be rotated into the MPPI frame by pos_rotation, exactly
+            # as world_to_mppi does, before projecting onto the MPPI heading. Projecting
+            # raw world velocity onto yaw_w instead reads ~0 or negative while the car is
+            # moving forward, because the etk800's forward axis is offset from the
+            # quaternion yaw by VEHICLE_FORWARD_OFFSET. Under the max(0,v) clamp that fed
+            # v=0 to the MPPI and blinded it, since its model ignores steering at v=0.
             vmx = math.cos(pos_rotation) * vx - math.sin(pos_rotation) * vy
             vmy = math.sin(pos_rotation) * vx + math.cos(pos_rotation) * vy
             v = vmx * math.cos(myaw) + vmy * math.sin(myaw)
@@ -547,10 +543,9 @@ def main():
                 full_stop(vehicle, bng)   # firm latched stop (parking brake on)
                 break
 
-            # Distance to the nearest point on the path.
-            # IMPORTANT: scan the full path (was previously limited to the first 600 wp
-            # which gave incorrect results on long straight paths).
-            # 1501 wp x 1 calculation ~ 0.5ms, no issue.
+            # Distance to the nearest point on the path. This scans the whole path; an
+            # earlier version stopped at the first 600 waypoints and gave wrong results on
+            # long straights. At 1501 waypoints the full scan costs ~0.5 ms.
             _nearest = min(path_points,
                            key=lambda p: math.hypot(mx - p[0], my - p[1]))
             ref_x, ref_y = _nearest
@@ -617,10 +612,10 @@ def main():
             steer_raw = max(-1.0, min(1.0, steer_raw))
             steer_target = steer_raw
 
-            # Symmetric slew-rate limiter. NOTE: tightening this to damp the weave
-            # (tried 0.10) adds steering lag and the car can't corner in time ->
-            # keep it loose (0.30). The weave is better reduced at the source (MPPI
-            # sampling noise sigma) than by a hard external rate cap.
+            # Symmetric slew-rate limiter. Tightening it to damp the weave (0.10 was tried)
+            # adds steering lag and the car stops making corners in time, so it stays loose
+            # at 0.30. The weave is better reduced at its source, the MPPI sampling sigma,
+            # than by a hard external rate cap.
             if 'prev_steer' not in _bridge_state:
                 _bridge_state['prev_steer'] = 0.0
             prev = _bridge_state['prev_steer']
@@ -672,7 +667,7 @@ def main():
             prof["iter"] = prof.get("iter", 0.0) + (time.perf_counter() - _t_iter) * 1000
             if PROFILE_LOOP and prof["n"] >= 20:
                 n = prof["n"]
-                print(f"[PROFIL] dongu {prof['iter']/n:6.1f} ms/adim = "
+                print(f"[PROFILE] loop {prof['iter']/n:6.1f} ms/step = "
                       f"pause {prof['pause']/n:5.1f} + poll {prof['poll']/n:5.1f} + "
                       f"kontrol-bekle {prof['ctrl_wait']/n:6.1f} + uygula {prof['apply']/n:5.1f} + "
                       f"step {prof['step']/n:5.1f} + ciz {prof['draw']/n:5.1f}")
@@ -701,9 +696,9 @@ def main():
             print(f"[Bridge] {run_log_name} written")
         except Exception:
             pass
-        # Make sure the car is parked (also covers Ctrl+C / exception exits): NEUTRAL
-        # + parking brake, brake released. Do NOT hold the brake here - at a standstill
-        # that makes the automatic shift to reverse and drive backward.
+        # Park the car, which also covers Ctrl+C and exception exits: neutral plus parking
+        # brake, with the brake released. Holding the brake here would make the automatic
+        # shift into reverse at a standstill and drive backwards.
         try:
             if vehicle is not None:
                 vehicle.control(throttle=0.0, brake=0.0, steering=0.0,

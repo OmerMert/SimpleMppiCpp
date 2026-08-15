@@ -40,9 +40,9 @@ SETTLE_TIME = 3.0         # seconds to reach target speed first
 
 PHYSICS_HZ = 50
 
-# Physical wheelbase of the etk800, measured from the jbeam axle nodes
-# (front hub ~ y=-1.43 m, rear hub ~ y=+1.40 m -> ~2.82 m). L is NOT fitted
-# (it is unidentifiable from steady-state yaw); we pin it to this real value.
+# Physical wheelbase of the etk800, measured from the jbeam axle nodes: front hub at
+# y = -1.43 m, rear hub at y = +1.40 m, giving ~2.82 m. L is not fitted, since it is
+# unidentifiable from steady-state yaw, so it is pinned to this measured value.
 PHYS_WHEELBASE = 2.82
 # =============================================
 
@@ -255,10 +255,10 @@ def main():
     with open(ORIGINAL_CONFIG, "r") as f:
         cfg = json.load(f)
 
-    # Pin wheel_base to the physical value. DO NOT overwrite max_steer_abs:
-    # it is the MPPI command cap (kept conservative for the linear regime),
-    # NOT the effective full-lock angle. The bridge derives its rad->norm scale
-    # as MAX_STEER_RAD = gain_G * wheel_base.
+    # Pin wheel_base to the physical value. max_steer_abs is deliberately left alone: it
+    # is the MPPI command cap, kept conservative to stay in the linear regime, and not the
+    # effective full-lock angle. The bridge derives its rad->norm scale separately as
+    # MAX_STEER_RAD = gain_G * wheel_base.
     cfg['wheel_base'] = round(fit['L_eff'], 3)
     cfg['beamng_calibration'] = {
         'source': 'beamng_sysid.py (BeamNG = reference)',

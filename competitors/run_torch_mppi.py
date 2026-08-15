@@ -1,13 +1,12 @@
-"""
-Rakip #3: UM-ARM-Lab/pytorch_mppi (Williams et al. 2017 MPPI, PyTorch).
+"""Competitor #3: UM-ARM-Lab/pytorch_mppi (Williams et al. 2017 MPPI in PyTorch).
 
-Rakibin kontrolcusu DEGISTIRILMEZ; ona sadece bizim model + maliyetimiz verilir:
-kinematik bisiklet, ayni asama/terminal agirliklari, ileri-200 pencereli waypoint
-aramasi ve SERT carpisma cezasi (referanstaki _is_collided'in karsiligi). Bizim CBF
-yumusak bariyerimiz BILEREK verilmez.
+The competitor's controller is left unmodified; it is only given our model and cost:
+kinematic bicycle, the same stage and terminal weights, the forward-200 waypoint search
+and the hard collision penalty that mirrors the reference's _is_collided. Our soft CBF
+barrier is deliberately withheld.
 
-Cihaz: MPPI_DEVICE=cuda|cpu (varsayilan: CUDA varsa cuda, yoksa cpu).
-Ortak iskelet (UDP, yol/engel yukleme, sure olcumu) _harness.py'de.
+Device comes from MPPI_DEVICE=cuda|cpu, defaulting to cuda when it is available. Shared
+plumbing is in _harness.py.
 """
 import os
 
@@ -19,20 +18,21 @@ import _harness as H
 
 DTYPE = torch.float32
 
-# pytorch_mppi'de `alpha` YOK; lambda_ hem softmax sicakligi HEM kontrol maliyeti
-# agirligidir (action_cost = lambda_ * noise @ Sigma^-1, yani gamma = lambda). Bizde ve
-# referansta gamma = lambda*(1-alpha) = 100*(1-0.98) = 2. Config'deki 100 aynen verilirse
-# kontrol maliyeti 50x agir kalir: OLCULDU -> ivme ort +0.41 (limit 2.5), arac hizlanamiyor.
-# lambda=2 ile ayni testte 2.29 m/s. Parametrelendirme farki, implementasyon kusuru degil;
-# hiz metrigi lambda'dan etkilenmez. Birebir-config kosusu icin: MPPI_LAMBDA=100.
+# pytorch_mppi has no `alpha`: lambda_ is both the softmax temperature and the control
+# cost weight (action_cost = lambda_ * noise @ Sigma^-1, so gamma = lambda). Ours and the
+# reference use gamma = lambda*(1-alpha) = 100*(1-0.98) = 2. Passing the config's 100
+# straight through leaves the control cost 50x too heavy; measured, that caps mean accel
+# at +0.41 against a limit of 2.5 and the car never gets up to speed, versus 2.29 m/s at
+# lambda=2. This is a parameterisation difference, not a flaw in the implementation, and
+# the timing metric is unaffected by lambda. Use MPPI_LAMBDA=100 for a literal-config run.
 LAMBDA_MATCHED_GAMMA = 2.0
 
 
 def build_problem(cfg, ref_path, circles, device):
-    """Bizim model + maliyet -> pytorch_mppi'nin bekledigi fonksiyonlar.
+    """Our model and cost, packaged as the functions pytorch_mppi expects.
 
-    Durum: [x, y, yaw, v, wp_idx] (nx=5). wp_idx pencereli aramayi rollout boyunca
-    ilerletir (C++ ve referans da prev_idx'i boyle tasir).
+    State is [x, y, yaw, v, wp_idx] (nx=5). wp_idx carries the windowed search forward
+    through the rollout, the same way the C++ and the reference carry prev_idx.
     """
     dt, L = float(cfg["delta_t"]), float(cfg["wheel_base"])
     w = torch.tensor(cfg["stage_cost_weight"], dtype=DTYPE, device=device)
@@ -61,7 +61,7 @@ def build_problem(cfg, ref_path, circles, device):
         return torch.gather(cand, 1, d2.argmin(dim=1, keepdim=True)).squeeze(1)
 
     def collision_cost(x, y, yaw):
-        """Referansin _is_collided * 1e10 karsiligi (9 govde noktasi). CBF YOK."""
+        """Equivalent of the reference's _is_collided * 1e10 over the 9 body points. No CBF."""
         if not has_obs:
             return torch.zeros_like(x)
         c, s = torch.cos(yaw), torch.sin(yaw)
@@ -78,7 +78,7 @@ def build_problem(cfg, ref_path, circles, device):
                 weights[2] * dyaw ** 2 + weights[3] * (v - ref[:, 3]) ** 2)
 
     def dynamics(state, action):
-        """Kinematik bisiklet - C++ update_state_gpu ile birebir."""
+        """Kinematic bicycle, identical to the C++ update_state_gpu."""
         x, y, yaw, v, idx = state.unbind(dim=1)
         steer, accel = action[:, 0], action[:, 1]
         nx = x + v * torch.cos(yaw) * dt
@@ -102,7 +102,7 @@ def main():
 
     want = os.environ.get("MPPI_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
     if want == "cuda" and not torch.cuda.is_available():
-        print("[TorchMPPI] UYARI: CUDA yok (CPU-only torch), cpu'ya dusuluyor.")
+        print("[TorchMPPI] WARNING: no CUDA (CPU-only torch build), falling back to cpu.")
         want = "cpu"
     device = torch.device(want)
     on_gpu = device.type == "cuda"
@@ -113,7 +113,7 @@ def main():
 
     ctrl = MPPI(
         dynamics=dynamics, running_cost=running_cost, nx=5,
-        # pytorch_mppi noise_sigma'yi KOVARYANS alir -> config'deki sigma dogrudan girer
+        # pytorch_mppi treats noise_sigma as a covariance, so config's sigma goes in as-is
         noise_sigma=torch.tensor(cfg["sigma"], dtype=DTYPE, device=device),
         num_samples=int(cfg["number_of_samples_K"]),
         horizon=int(cfg["horizon_step_T"]),
@@ -126,22 +126,22 @@ def main():
         act = ctrl.command(torch.tensor([x, y, yaw, v, float(idx)],
                                         dtype=DTYPE, device=device))
         if on_gpu:
-            torch.cuda.synchronize()      # async kernel'leri bekle -> dogru sure olcumu
+            torch.cuda.synchronize()      # kernels are async; wait so timing is real
         a = act.detach().cpu().numpy()
         return float(a[0]), float(a[1])
 
-    # isinma (tahsis/derleme benchmark'a girmesin)
+    # warm-up, so allocation and compilation stay out of the benchmark
     solve(0.0, 0.0, 0.0, 0.0, 0)
     ctrl.reset()
 
     our_gamma = float(cfg["param_lambda"]) * (1 - float(cfg["param_alpha"]))
     H.serve("TorchMPPI", cfg, ref_path, solve, *H.ports(), banner=(
-        "Rakip: pytorch_mppi (UM-ARM-Lab) - Williams et al. 2017, PyTorch",
-        f"torch {torch.__version__} | cihaz={device}"
+        "Competitor: pytorch_mppi (UM-ARM-Lab) - Williams et al. 2017, PyTorch",
+        f"torch {torch.__version__} | device={device}"
         + (f" ({torch.cuda.get_device_name(0)})" if on_gpu else " (CPU)"),
         f"K={ctrl.K} T={ctrl.T} dt={cfg['delta_t']} L={cfg['wheel_base']} "
-        f"| engel={len(circles)} | ref_path {ref_path.shape}",
-        f"lambda={lam:g} -> gamma={lam:g} (bizim gamma={our_gamma:g})",
+        f"| obstacles={len(circles)} | ref_path {ref_path.shape}",
+        f"lambda={lam:g} -> gamma={lam:g} (ours: gamma={our_gamma:g})",
     ))
 
 

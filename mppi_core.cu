@@ -58,7 +58,6 @@ __device__ float sample_grid(
     return grid[r * cols + c];
 }
 
-// CBF Function
 __device__ float compute_cbf_cost(
     float x, float y, float yaw, 
     const Obstacle* obstacles, int num_obs,
@@ -78,11 +77,10 @@ __device__ float compute_cbf_cost(
         float obs_y = obstacles[i].y;
         float obs_r = obstacles[i].r;
 
-        // Closest approach of ANY body key point to the obstacle SURFACE.
-        // Footprint-based (NOT a circumscribing circle): the old
-        // robot_radius = 0.5*sqrt(vw^2+vl^2) treated a 4.8 m car as a 3 m-radius
-        // disk -> a ~5 m keep-out -> avoidance needed a ~4 m swerve -> infeasible,
-        // so the car just stopped. Using the real footprint keeps it feasible.
+        // Closest approach of any body key point to the obstacle surface. Uses the
+        // footprint rather than a circumscribing circle: robot_radius =
+        // 0.5*sqrt(vw^2+vl^2) made a 4.8 m car a 3 m disk, which forced a ~4 m swerve
+        // to clear an obstacle and left the car stopped instead.
         float min_h = 1e10f;
         for(int p = 0; p < 9; ++p) {
             float gpx = (local_x[p] * c - local_y[p] * s) + x;
@@ -108,11 +106,9 @@ __device__ bool check_collision_gpu(
     const Obstacle* obstacles, int num_obs,
     float vw, float vl) {
     
-    // key points for collision check
     float local_x[9] = {-0.5f*vl, -0.5f*vl, -0.5f*vl,  0.0f,      0.0f,     0.0f,     0.5f*vl, 0.5f*vl, 0.5f*vl};
     float local_y[9] = {-0.5f*vw,  0.0f,     0.5f*vw,  0.5f*vw,  -0.5f*vw,  0.0f,     0.5f*vw, 0.0f,   -0.5f*vw};
 
-    // check if the key points are inside the obstacles
     for(int i = 0; i < num_obs; ++i) {
 
         float r_sq = obstacles[i].r * obstacles[i].r;
@@ -124,7 +120,7 @@ __device__ bool check_collision_gpu(
             float dist_sq = (global_px - obstacles[i].x)*(global_px - obstacles[i].x) + (global_py - obstacles[i].y)*(global_py - obstacles[i].y);
 
             if(dist_sq < r_sq) {
-                return true; // collided
+                return true;
             }
         }
     }
@@ -142,9 +138,9 @@ __device__ void get_nearest_waypoint_gpu(
     
     // Forward-only search, same as the reference implementation (MizuhoAOKI
     // _get_nearest_waypoint, SEARCH_IDX_LEN=200). An earlier 50-step backward window was
-    // dropped: measured over 2675 logged steps the nearest index NEVER moved backwards, so
-    // it only added ~25% search work per rollout step. (Re-add it if the car can travel
-    // backwards along the path - e.g. on slopes in the offroad branch.)
+    // dropped: over 2675 logged steps the nearest index never moved backwards, so it only
+    // added ~25% search work per rollout step. Re-add it if the car can travel backwards
+    // along the path, for example on slopes in the offroad branch.
     int SEARCH_FWD = 200;
     int start_idx = prev_idx > 0 ? prev_idx : 0;
     int end_idx = (prev_idx + SEARCH_FWD < path_size) ? prev_idx + SEARCH_FWD : path_size;
@@ -232,7 +228,6 @@ __global__ void mppi_rollout_kernel(
             accel = u_prev[u_idx + 1] + n_accel;
         }
 
-        // Clamp
         if(steer > max_steer) steer = max_steer;
         if(steer < -max_steer) steer = -max_steer;
         if(accel > max_accel) accel = max_accel;
@@ -272,10 +267,10 @@ __global__ void mppi_rollout_kernel(
         stage_cost += compute_cbf_cost(x, y, yaw, obstacles, num_obs, vehicle_w, vehicle_l,
                                        influence_radius, cbf_weight, decay_rate);
 
-        // Obstacle costmap: EXTRA soft cost on top of compute_cbf_cost() above.
-        // Does NOT replace the CBF (that remains the exact, footprint/yaw-aware
-        // collision avoidance) - this is a coarse (x,y)-only grid, disabled by
-        // default (weight 0), see config.json OBSTACLE_COSTMAP_WEIGHT.
+        // Obstacle costmap: an additional soft cost on top of compute_cbf_cost above,
+        // not a replacement for it. This grid is coarse and (x,y)-only, while the CBF
+        // stays the exact footprint- and yaw-aware check. Disabled by default; see
+        // config.json OBSTACLE_COSTMAP_WEIGHT.
         if (obstacle_costmap_weight > 0.0f) {
             float obs_cost = sample_grid(x, y, obstacle_costmap, obs_rows, obs_cols,
                                          obs_res, obs_x_min, obs_y_min);
@@ -354,7 +349,7 @@ extern "C" void launch_mppi_gpu(
     cudaMemcpy(d_path, h_ref_path, path_size * 4 * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_obs, h_obstacles, num_obs * sizeof(Obstacle), cudaMemcpyHostToDevice);
 
-    // Obstacle costmap grid (optional, additive on top of the analytic CBF).
+    // Obstacle costmap grid: optional, additive on top of the analytic CBF.
     const int obs_cells = obs_rows * obs_cols;
     const bool use_obstacle_costmap = (h_obstacle_costmap != nullptr && obs_cells > 0 && obstacle_costmap_weight > 0.0f);
     if (use_obstacle_costmap) {

@@ -1,16 +1,15 @@
-"""
-Rakip #1: MizuhoAOKI/python_simple_mppi - bizim C++'in port edildigi ASIL referans.
-Saf NumPy, K x T cift dongusu (vektorize DEGIL); OLDUGU GIBI kosturulur.
+"""Competitor #1: MizuhoAOKI/python_simple_mppi, the reference our C++ was ported from.
 
-Ortak iskelet (UDP, yol/engel yukleme, sure olcumu) _harness.py'de.
-Burada SADECE: referans MPPI'yi bizim config'e esitlenmis parametrelerle kurmak.
+Pure NumPy with a K x T double loop rather than a vectorised one, run as published. The
+shared plumbing (UDP, path and obstacle loading, timing) is in _harness.py; all that is
+left here is constructing the reference MPPI with parameters matched to our config.
 """
 import numpy as np
 
 import _harness as H
 
-# Referans MPPI sinifi (kodu DEGISTIRILMEDI). Modul tepesinde pathtracking_kbm_obav'dan
-# Vehicle cekiliyor ama MPPI sinifi onu kullanmiyor - sadece repo'nun kendi demosu kullanir.
+# The reference MPPI class, unmodified. Its module imports Vehicle from
+# pathtracking_kbm_obav at the top, but only the repo's own demo uses that.
 import sys, os                                                        # noqa: E402
 sys.path.insert(0, os.path.join(H.HERE, "python_simple_mppi", "scripts"))
 from mppi_pathtracking_obav import MPPIControllerForPathTracking      # noqa: E402
@@ -36,22 +35,22 @@ def main():
         sigma=np.array(cfg["sigma"], dtype=float),
         stage_cost_weight=np.array(cfg["stage_cost_weight"], dtype=float),
         terminal_cost_weight=np.array(cfg["terminal_cost_weight"], dtype=float),
-        visualize_optimal_traj=False,      # gorsel kapali -> saf solve zamani olculur
+        visualize_optimal_traj=False,      # drawing off, so only solve time is measured
         visualze_sampled_trajs=False,
         obstacle_circles=circles,
-        collision_safety_margin_rate=1.0,  # olcek H.footprint'te uygulandi
+        collision_safety_margin_rate=1.0,  # the scaling is already applied in H.footprint
     )
 
     def solve(x, y, yaw, v, idx):
-        # Referans kendi en yakin waypoint aramasini icerde yapar (idx kullanilmaz);
-        # yol sonunda IndexError firlatir -> iskelet bunu "tamamlandi" olarak alir.
+        # The reference does its own nearest-waypoint search, so idx is unused, and it
+        # raises IndexError at the end of the path, which the harness reads as "finished".
         u0, _, _, _ = mppi.calc_control_input(np.array([x, y, yaw, v], dtype=float))
         return float(u0[0]), float(u0[1])
 
     H.serve("PyMPPI", cfg, ref_path, solve, *H.ports(), banner=(
-        "Rakip: python_simple_mppi (MizuhoAOKI) - saf NumPy",
+        "Competitor: python_simple_mppi (MizuhoAOKI) - pure NumPy",
         f"K={mppi.K} T={mppi.T} dt={mppi.delta_t} L={mppi.wheel_base} "
-        f"| engel={len(circles)} | ref_path {ref_path.shape}",
+        f"| obstacles={len(circles)} | ref_path {ref_path.shape}",
     ))
 
 

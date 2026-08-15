@@ -1,24 +1,20 @@
-"""
-obstacles.py - Paylasilan engel maliyet modeli.
+"""Shared obstacle cost model.
 
-scenario.py OBSTACLES -> cemberler (dikdortgen -> cevreleyen cember, mppi_core.cu
-compute_cbf_cost'taki ile ayni yaklasim). obstacle_cost() formulu de ayni CBF
-falloff'unu (exp(-decay_rate*h), yuzeyden h<0 -> sert maliyet) tekrar eder ki
-uretilen costmap, C++ CBF'nin gordugu maliyetle GORSEL/kavramsal olarak tutarli
-olsun.
+Turns scenario.py's OBSTACLES into circles (rectangles become their circumscribing
+circle, as mppi_core.cu compute_cbf_cost does) and reproduces the same CBF falloff,
+exp(-decay_rate * h) with a hard cost inside the surface, so the generated costmap stays
+consistent with what the C++ CBF actually sees.
 
-ONEMLI: bu costmap MPPI'daki analitik CBF'nin (footprint+yaw farkinda, mppi_core.cu
-compute_cbf_cost) YERINE GECMEZ - ona EK bir yumusak maliyet katmanidir (bkz.
-config.json OBSTACLE_COSTMAP_WEIGHT, varsayilan 0 = kapali). CBF nokta-bazli degil,
-aracin 9 govde noktasini yaw'a gore donduruyor; bu modul ise sadece (x,y) nokta
-yaklasimi kullanir - kucuk bir yardimci sinyal icin yeterli, hassas carpisma
-kontrolu icin degil.
+This costmap does not replace the analytic CBF in mppi_core.cu; it is an additional soft
+layer on top of it (config.json OBSTACLE_COSTMAP_WEIGHT, 0 by default). The CBF rotates
+the car's nine body points by yaw, whereas this module only evaluates a single (x, y)
+point - enough for a coarse guidance signal, not for collision checking.
 """
 import math
 
 
 def load_obstacle_circles(raw_list):
-    """[x,y,r] veya [x,y,w,h] -> [(x,y,r), ...] (dikdortgen -> cevreleyen cember)."""
+    """[x,y,r] or [x,y,w,h] -> [(x,y,r), ...], rectangles via their circumscribing circle."""
     circles = []
     for o in raw_list:
         if len(o) == 3:
@@ -31,11 +27,12 @@ def load_obstacle_circles(raw_list):
 
 
 def obstacle_cost(x, y, circles, influence_radius, cbf_weight, decay_rate):
-    """(x,y) noktasindaki engel maliyeti - mppi_core.cu compute_cbf_cost'un nokta-bazli hali.
+    """Point-based version of mppi_core.cu compute_cbf_cost.
 
-    h = engel YUZEYINE mesafe. h<=0 (cember icinde) -> sabit sert maliyet (1e6,
-    CSV/onizlemede okunakli kalsin diye CBF'nin 1e9'undan kucuk). 0 < h < influence_radius
-    -> cbf_weight * exp(-decay_rate*h) (en kotu/en yakin engel gecerli). Disarida 0.
+    h is the distance to the obstacle surface. Inside the circle (h <= 0) the cost is a
+    flat 1e6 - smaller than the CBF's 1e9 so the CSV and the preview stay readable. Within
+    the influence radius it is cbf_weight * exp(-decay_rate * h) for the nearest obstacle,
+    and zero beyond.
     """
     cost = 0.0
     for (cx, cy, r) in circles:

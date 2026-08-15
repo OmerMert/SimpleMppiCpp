@@ -15,7 +15,6 @@ using State = Vector4d;
 // Control vector: [steer, accel]
 using Control = Vector2d; 
 
-// Obstacle structure
 struct Obstacle {
     float x;
     float y;
@@ -72,13 +71,13 @@ public:
     // Returns: [ref_x, ref_y, ref_yaw, ref_v]
     Vector4d _get_nearest_waypoint(double x, double y, bool update_prev_idx = false);
 
-    // Vehicle body box used by the collision check / CBF. Read from config.json
-    // (VEHICLE_FOOTPRINT) so the C++ MPPI and every competitor wrapper use the SAME car.
+    // Vehicle body box used by the collision check and the CBF. Read from config.json
+    // VEHICLE_FOOTPRINT, so this MPPI and every competitor wrapper drive the same car.
     void set_vehicle_footprint(double width, double length, double safety_margin);
 
-    // Obstacle costmap: EXTRA soft cost added on top of the analytic CBF (does NOT
-    // replace it - the CBF footprint/collision logic in mppi_core.cu is untouched).
-    // Not calling this (or weight <= 0) simply disables the term.
+    // Obstacle costmap: a soft cost added on top of the analytic CBF, which it does not
+    // replace; the footprint and collision logic in mppi_core.cu is untouched. Leaving
+    // this uncalled, or passing weight <= 0, disables the term.
     void set_obstacle_costmap(const std::vector<float>& data, int rows, int cols,
                               float resolution, float x_min, float y_min, float weight);
 private:
@@ -97,9 +96,9 @@ private:
     Vector4d stage_cost_weight;
     Vector4d terminal_cost_weight;
     std::vector<Obstacle> obstacles;
-    // Vehicle body box (etk800). Defaults are only a fallback - main.cpp overwrites them
-    // from config.json VEHICLE_FOOTPRINT via set_vehicle_footprint(), which is also what
-    // the competitor wrappers read, so every controller collides with the same car.
+    // Vehicle body box (etk800). These defaults are only a fallback; main.cpp overwrites
+    // them from config.json VEHICLE_FOOTPRINT via set_vehicle_footprint(), which is also
+    // what the competitor wrappers read, so every controller collides with the same car.
     double vehicle_width = 1.9;
     double vehicle_length = 4.5;
     double safety_margin_rate = 1.0;
@@ -115,7 +114,7 @@ private:
     float cbf_weight;
     float decay_rate;
 
-    // Obstacle costmap (EXTRA cost, additive to the CBF); empty/weight 0 -> disabled
+    // Obstacle costmap, additive to the CBF; empty or weight 0 means disabled
     std::vector<float> obstacle_costmap_data;
     int   obs_rows = 0, obs_cols = 0;
     float obs_res = 1.0f, obs_x_min = 0.0f, obs_y_min = 0.0f;
