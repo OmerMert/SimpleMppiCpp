@@ -27,10 +27,13 @@ import subprocess
 import time
 import csv
 import json
+import importlib.util
 
+import beamngpy
 from beamngpy import BeamNGpy, Scenario, Vehicle, ProceduralCylinder, ProceduralCube
 
-from scenario import OBSTACLES
+from scenario import OBSTACLES, ROUGHNESS
+from roughness import load_roughness_zones, terrain_height
 
 # ============ USER SETTINGS ============
 BNG_HOME = r"D:\BeamNG.tech.v0.38.5.0"   # folder containing tech.key
@@ -43,7 +46,11 @@ CPP_LISTEN_PORT = 5005
 PY_LISTEN_PORT  = 5006
 
 # All per-step run logs go here (one csv per controller/mode), keeping the project root clean.
-RUNS_DIR = "runs"
+# The file name only encodes the controller and the mode, so two scenarios writing into the
+# same folder silently overwrite each other - that cost us the paper's oval logs three times
+# (recovered from git each time). Point MPPI_RUNS_DIR at a per-scenario folder instead:
+#     set MPPI_RUNS_DIR=runs/figure8&& python beamng_bridge.py jax step
+RUNS_DIR = os.environ.get("MPPI_RUNS_DIR", "runs")
 
 # --- Controller under test (SWAPPABLE for the MPPI speed benchmark) ---
 # The harness (this bridge, BeamNG, path, obstacles, metrics) stays identical; only the
@@ -96,6 +103,12 @@ with open("config.json", 'r') as f:
 
 # --- PATH SELECTION ---
 PATH_CSV = data["REF_PATH_FILE"]
+
+# Uneven terrain: off by default, so every existing flat-ground run is unaffected.
+# MPPI_ROUGH=1 loads the scenario.ROUGHNESS heightmap after spawn calibration.
+ROUGH_TERRAIN = os.environ.get("MPPI_ROUGH", "0") == "1"
+TERRAIN_CFG = data.get("TERRAIN", {"size": 256, "resolution": 1.0,
+                                   "z_max": 1.0, "material": "Dirt"})
 
 # Obstacles come from the same source as the C++ CBF and the obstacle costmap
 # (scenario.py OBSTACLES, imported above), in the MPPI frame as [x, y, r] circles or
@@ -214,6 +227,102 @@ def full_stop(vehicle, bng, ticks=40):
         bng.control.step(1, wait=True)
     # latch parked: neutral + parking brake, brake released
     vehicle.control(throttle=0.0, brake=0.0, steering=0.0, parkingbrake=1.0, gear=0)
+
+
+# ======================================================================
+# UNEVEN TERRAIN  -  scenario.ROUGHNESS -> BeamNG heightmap
+# ======================================================================
+# This is a SIMULATOR-side disturbance only. No controller sees the terrain: all four
+# compared implementations keep the identical cost function they use on flat ground, so
+# the comparison stays apples-to-apples and the rough ground only widens the gap between
+# the kinematic model and the soft-body vehicle. Ported from the offroad branch, minus
+# the roughness stage-cost term that branch also carries.
+def _load_terrain_importer():
+    """Load Terrain_Importer in ISOLATION (beamngpy.tools/__init__ pulls in fastapi)."""
+    p = os.path.join(os.path.dirname(beamngpy.__file__), "tools", "terrain_import.py")
+    spec = importlib.util.spec_from_file_location("bng_terrain_import", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.Terrain_Importer
+
+
+def _bounding_square(s):
+    """Same as Lua findBoundingSquare: the smallest power of two greater than s."""
+    t = 64
+    for _ in range(20):
+        t *= 2
+        if t > s:
+            return t
+    return None
+
+
+def import_roughness_terrain(bng, vehicle, zones, terrain_cfg, world_to_mppi,
+                             spawn_pos, spawn_quat):
+    """Build the physical BeamNG ground from the MPPI-frame roughness zones.
+
+    Every heightmap pixel is mapped world -> MPPI with the bridge's OWN world_to_mppi
+    transform before terrain_height is evaluated, so the bumps land on the MPPI
+    coordinates from scenario.py - the same frame the controller drives in.
+
+    Returns True if the terrain was loaded. On any failure the caller can simply carry
+    on with flat ground; nothing else in the control loop depends on this.
+    """
+    size = int(terrain_cfg.get("size", 256))
+    scale = float(terrain_cfg.get("resolution", 1.0))
+    zclamp = float(terrain_cfg.get("z_max", 1.0))
+    N = size - 1                         # data 255 -> Lua rounds bmp up to 256
+    bmp = _bounding_square(N)
+    half = 0.5 * bmp * scale             # terrain extent [-half, half]
+
+    data_grid = {}
+    zmin, zmax = 1e9, -1e9
+    for i in range(N):
+        wx = -half + i * scale
+        row = {}
+        for j in range(N):
+            wy = -half + j * scale
+            mx, my, _ = world_to_mppi(wx, wy, 0.0)
+            h = max(-zclamp, min(zclamp, terrain_height(mx, my, zones)))
+            row[j] = h
+            zmin = min(zmin, h)
+            zmax = max(zmax, h)
+        data_grid[i] = row
+
+    if zmax - zmin < 1e-6:
+        print("[Bridge] Roughness field is flat (no zones?) - terrain import skipped.")
+        return False
+
+    TI = _load_terrain_importer()
+    print(f"[Bridge] Importing roughness heightmap ({N}x{N}, relief {zmax - zmin:.2f} m)...")
+    TI.import_heightmap(bng, data_grid, N, N, scale=scale, zMin=zmin, zMax=zmax,
+                        isYFlipped=True)
+    bng.control.queue_lua_command(
+        "if core_terrain.getTerrain() then "
+        f"core_terrain.getTerrain():setPosition(vec3({-half},{-half},0)); "
+        "be:reloadCollision() end")
+    print(f"[Bridge] Rough ground loaded and centred on the origin (extent +-{half:.0f} m).")
+
+    # Ground material. BeamNG's terrainGenerator hard-codes defaultMaterial='Grass', so
+    # the generated ground is always grass; swap that layer's material at runtime.
+    material = terrain_cfg.get("material")
+    if material and material != "Grass":
+        bng.control.queue_lua_command(
+            "local t = core_terrain.getTerrain(); "
+            "if t then local ms = t:getMaterials(); "
+            "for i = 1, #ms do "
+            f"if ms[i]:getInternalName() == 'Grass' then t:updateMaterial(i-1, '{material}') end "
+            "end end")
+        print(f"[Bridge] Ground material -> {material}.")
+
+    # Drop the car onto the new ground (MPPI is 2-D, so z does not affect tracking).
+    for _ in range(10):
+        bng.control.step(1, wait=True)
+    vehicle.teleport(pos=(spawn_pos[0], spawn_pos[1], spawn_pos[2] + zmax + 1.0),
+                     rot_quat=spawn_quat, reset=True)
+    for _ in range(30):
+        vehicle.control(throttle=0.0, brake=0.0, steering=0.0)
+        bng.control.step(1, wait=True)
+    return True
 
 
 def main():
@@ -429,6 +538,24 @@ def main():
         if abs(mx_c) > 0.5 or abs(my_c) > 0.5 or abs(math.degrees(myaw_c)) > 5:
             print("[Bridge] WARNING: Vehicle is not at the zero point after teleport!")
             print("[Bridge] Continuing anyway (MPPI will use the real state)")
+
+        # --- Uneven terrain (optional, MPPI_ROUGH=1) ---
+        # Must come after calibration: the heightmap is aligned with world_to_mppi.
+        # Purely a simulator-side disturbance; no controller is aware of it.
+        if ROUGH_TERRAIN:
+            zones = load_roughness_zones(ROUGHNESS)
+            if zones:
+                try:
+                    import_roughness_terrain(
+                        bng, vehicle, zones, TERRAIN_CFG, world_to_mppi,
+                        spawn_pos=(x0_world, y0_world, 0.5),
+                        spawn_quat=(qx, qy, qz, qw))
+                except Exception as e:
+                    print(f"[Bridge] Terrain import failed ({e}) - continuing on flat ground.")
+            else:
+                print("[Bridge] MPPI_ROUGH=1 but scenario.ROUGHNESS is empty - flat ground.")
+        else:
+            print("[Bridge] Flat ground (set MPPI_ROUGH=1 for the uneven-terrain run).")
 
         # --- Is the C++ MPPI exe still running? ---
         if mppi_proc.poll() is not None:

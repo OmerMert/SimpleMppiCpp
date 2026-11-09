@@ -116,6 +116,90 @@ def generate_large_oval(length=150.0, width=80.0):
     return generate_wide_oval(length, width)
 
 
+def generate_figure_eight(a=30.0, ref_v=REF_VELOCITY):
+    """Figure-eight (Bernoulli lemniscate), resampled to uniform RESOLUTION spacing.
+
+    Harder than the oval for two reasons: curvature is never constant (the vehicle is
+    always either tightening or opening the turn, so there is no steady state to settle
+    into), and the path crosses itself, which the controller must handle purely from the
+    forward-only waypoint window.
+
+    The self-crossing is safe for that window: from the crossing the path only returns
+    after a full lobe, far beyond the 200-point (20 m) search horizon, so the nearest
+    waypoint can never jump to the other branch.
+
+    Curvature: R_min = a/3, so a=30 m gives a 10 m minimum radius against the vehicle's
+    ~4.75 m limit (L / tan(max_steer) = 2.82 / tan(0.534)).
+
+    The whole curve is rigidly transformed so it starts at (0,0) heading +x, matching how
+    the bridge spawns the car.
+    """
+    # dense parametric sampling, then uniform resampling by arc length
+    M = 20000
+    xs, ys = [], []
+    for k in range(M + 1):
+        t = 2.0 * math.pi * k / M
+        s2 = math.sin(t) ** 2
+        xs.append(a * math.cos(t) / (1.0 + s2))
+        ys.append(a * math.sin(t) * math.cos(t) / (1.0 + s2))
+
+    # cumulative arc length
+    cum = [0.0]
+    for i in range(1, len(xs)):
+        cum.append(cum[-1] + math.hypot(xs[i] - xs[i - 1], ys[i] - ys[i - 1]))
+    total = cum[-1]
+
+    n = int(total / RESOLUTION)
+    rx, ry = [], []
+    j = 0
+    for i in range(n):
+        target = i * RESOLUTION
+        while j < len(cum) - 2 and cum[j + 1] < target:
+            j += 1
+        span = cum[j + 1] - cum[j]
+        f = 0.0 if span <= 0 else (target - cum[j]) / span
+        rx.append(xs[j] + f * (xs[j + 1] - xs[j]))
+        ry.append(ys[j] + f * (ys[j + 1] - ys[j]))
+
+    # rigid transform: start at the origin, heading +x
+    yaw0 = math.atan2(ry[1] - ry[0], rx[1] - rx[0])
+    c, s = math.cos(-yaw0), math.sin(-yaw0)
+    x0, y0 = rx[0], ry[0]
+    px, py = [], []
+    for x, y in zip(rx, ry):
+        dx, dy = x - x0, y - y0
+        px.append(c * dx - s * dy)
+        py.append(s * dx + c * dy)
+
+    points = []
+    for i in range(len(px)):
+        nxt = (i + 1) % len(px)
+        yaw = normalize_angle(math.atan2(py[nxt] - py[i], px[nxt] - px[i]))
+        points.append((round(px[i], 4), round(py[i], 4), round(yaw, 6), ref_v))
+    return points
+
+
+def path_report(points, label):
+    """Length, curvature and self-approach report - is this path drivable?"""
+    n = len(points)
+    length = sum(math.hypot(points[(i + 1) % n][0] - points[i][0],
+                            points[(i + 1) % n][1] - points[i][1]) for i in range(n))
+    # curvature from the yaw rate along the path
+    rmin, kmax = float("inf"), 0.0
+    for i in range(n):
+        j = (i + 5) % n
+        dpsi = abs(normalize_angle(points[j][2] - points[i][2]))
+        ds = 5 * RESOLUTION
+        k = dpsi / ds
+        if k > kmax:
+            kmax = k
+    if kmax > 0:
+        rmin = 1.0 / kmax
+    print(f"  {label}: {n} waypoints, length {length:.1f} m, "
+          f"min turn radius ~{rmin:.1f} m")
+    return length, rmin
+
+
 def save_path(points, filename):
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)

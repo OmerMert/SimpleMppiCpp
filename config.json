@@ -21,6 +21,7 @@
         "OBSTACLE_COSTMAP_WEIGHT": "Weight of the additive obstacle-costmap term (stage_cost += weight * obstacle_costmap(x,y)). 0 (default) disables it - the analytic CBF alone still does all the avoidance, exactly as before this feature was added. Raise cautiously; do NOT touch this to 'fix' avoidance instead of the CBF/tracking params (see Log/08, Log/09 - tuning tracking params to fight obstacles previously broke smooth-path tracking).",
         "OBSTACLE_COSTMAP_INFLUENCE_RADIUS": "Influence radius [m] used ONLY when generate_costmaps.py rasterizes the obstacle costmap - independent from CBF_PARAMETERS.influence_radius (which stays tight/exact for the analytic CBF). Needs to be a few grid cells wide (>= GRID_RESOLUTION) or the soft falloff band is thinner than one cell and the costmap is effectively invisible.",
         "REF_PATH_FILE": "Reference path CSV with columns x, y, yaw, v (yaw is normalised to [-pi, pi] on load).",
+        "TERRAIN": "Uneven-terrain heightmap the bridge imports when MPPI_ROUGH=1. size/resolution give the grid (extent = 0.5 * next_pow2(size-1) * resolution), z_max clamps the height, material swaps the ground texture. SIMULATOR ONLY - no controller cost sees it, so the four-way comparison stays apples-to-apples.",
         "GRID_RESOLUTION": "Obstacle-costmap grid cell size [m]. The C++ side and generate_costmaps.py MUST agree or the map is misaligned.",
         "GRID_MARGIN": "Margin [m] added around the reference-path extent to size the obstacle costmap grid. Same agreement requirement as GRID_RESOLUTION.",
         "VEHICLE_FOOTPRINT": "Vehicle body box used by the 9-point collision check, in metres. This is the PROBLEM definition (the physical etk800), not an algorithm choice - the C++ MPPI and every competitor wrapper read it from here so all controllers avoid obstacles with the SAME car. safety_margin_rate scales the box (1.0 = model footprint equals the real car; 1.15 once inflated the half-width to 1.09 m > the 1.0 m gap to a side obstacle, so the reference line itself read as a collision - see Log/10)."
@@ -71,6 +72,7 @@
     "OBSTACLE_COSTMAP_WEIGHT": 0.0,
     "OBSTACLE_COSTMAP_INFLUENCE_RADIUS": 2.5,
     "REF_PATH_FILE": "data/ovalpath.csv",
+    "TERRAIN": {"size": 256, "resolution": 1.0, "z_max": 1.0, "material": "Dirt"},
     "GRID_RESOLUTION": 1.0,
     "GRID_MARGIN": 10.0,
     "_calibration_info": {
